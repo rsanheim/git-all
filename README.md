@@ -1,7 +1,9 @@
 # nit
 
-This is a CLI meant to explore different ways to handle parallel git tasks across many 
-repositorieis. For now, it should be a raw wrapper around `git` that, in its most basic form, 
+`nit` is a CLI meant to explore different ways to handle parallel git tasks across many 
+repositorieis. We will be implementing `nit` in many different languages to compare approaches. 
+
+For now, `nit` should be a raw wrapper around `git` that, in its most basic form, 
 simply runs git for all "sub-repos" with all args passed through.
 
 However, for some commands, we want to do better: we want to condense output and ensure performance is as fast as possible. For example, for the following:
@@ -117,3 +119,13 @@ etc...
 * all other git commands should be supported via pass-through mode
 * support dry-run mode with accurate output
 * basic CLI parsing / help / etc
+
+## Project structure and implementation notes
+
+Language implementations should go into a corresponding subdir, i.e. ./rust, ./ruby, etc.
+If there are multiple implementations per language, they can just use a more speicifc name, ie `./ruby-fibers`
+**ALL binairies/scripts for the end-result should be runnable via a wrapper bash script in ./bin/ - 
+so `./bin/nit-ruby` should run the ruby implementation, etc.
+
+Any scripts for benchmarking or housekeeping should into ./scripts. We can assume hyperfine is installed, and should use it!
+
