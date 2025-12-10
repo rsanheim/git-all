@@ -124,10 +124,37 @@ etc...
 
 Language implementations should go into a corresponding subdir, i.e. ./rust, ./ruby, etc.
 If there are multiple implementations per language, they can just use a more speicifc name, ie `./ruby-fibers`
-**ALL binairies/scripts for the end-result should be runnable via a wrapper bash script in ./bin/ - 
+ALL binairies/scripts for the end-result should be runnable via a wrapper bash script in ./bin/ - 
 so `./bin/nit-ruby` should run the ruby implementation, etc.
 
 Any scripts for benchmarking or housekeeping should into ./scripts. We can assume hyperfine is installed, and should use it!
 
 We use `mise` for installing tools and dependencies.
+
+## Performance: SSH Multiplexing
+
+For network operations (`pull`, `fetch`), SSH connection overhead is significant. Enable SSH multiplexing to reuse connections:
+
+Add to `~/.ssh/config`:
+
+```
+Host github.com
+  ControlMaster auto
+  ControlPath ~/.ssh/sockets/%r@%h-%p
+  ControlPersist 8h
+
+Host *
+  ControlMaster auto
+  ControlPath ~/.ssh/sockets/%r@%h-%p
+  ControlPersist 20m
+```
+
+Create the sockets directory:
+```bash
+mkdir -p ~/.ssh/sockets && chmod 700 ~/.ssh/sockets
+```
+
+This reduces `nit pull` time by ~3x by avoiding repeated SSH handshakes.
+
+See [docs/benchmarks.md](docs/benchmarks.md) for detailed benchmark results.
 

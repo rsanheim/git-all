@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NIT_RUST="${SCRIPT_DIR}/../bin/nit-rust"
+
+hyperfine \
+  --warmup 2 \
+  --min-runs 5 \
+  -L workers 1,2,4,8,12,16,0 \
+  "$NIT_RUST -n {workers} status"
