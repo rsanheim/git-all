@@ -1,15 +1,33 @@
 # Benchmark Results
 
-Benchmarks run on macOS with ~90 git repositories, using `hyperfine` with minimum 3-5 runs per configuration.
+Benchmarks run on macOS using `hyperfine` with minimum 3-5 runs per configuration.
 
 ## Environment
 
 * macOS (Darwin 24.6.0)
 * 20 CPU cores
 * SSH multiplexing enabled (ControlMaster)
-* Rust implementation (`nit-rust`)
 
-## git status
+## Implementation Comparison
+
+Head-to-head comparison of all implementations running `nit status` on 24 repositories:
+
+| Implementation | Time | vs Fastest |
+|----------------|------|------------|
+| **Zig** | 51ms | 1.0x |
+| **Rust** | 58ms | 1.1x |
+| **Ruby** | 119ms | 2.3x |
+
+**Notes:**
+* Zig and Rust are nearly identical - both compile to native code with minimal runtime
+* Ruby's overhead is mostly interpreter startup (~45ms); actual git execution is competitive
+* Ruby uses stdlib `Thread` pool (not the `parallel` gem) to minimize startup time
+
+## Worker Scaling
+
+Benchmarks below run with ~90 repositories using the Rust implementation.
+
+### git status
 
 Local filesystem operation - bottleneck is process spawning and filesystem I/O.
 
@@ -25,7 +43,7 @@ Local filesystem operation - bottleneck is process spawning and filesystem I/O.
 
 **Finding**: 4 workers is optimal for local operations. More parallelism causes filesystem/process contention.
 
-## git pull
+### git pull
 
 Network-bound operation - bottleneck is SSH connection and remote server.
 
@@ -38,7 +56,7 @@ Network-bound operation - bottleneck is SSH connection and remote server.
 
 **Finding**: 8 workers is optimal for network operations. More parallelism hides network latency.
 
-## git fetch
+### git fetch
 
 Similar to pull - network-bound.
 
