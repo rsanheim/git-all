@@ -2,7 +2,7 @@ use anyhow::Result;
 use rayon::prelude::*;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::Mutex;
 
 use crate::repo::repo_name;
@@ -69,6 +69,8 @@ impl GitCommand {
             .arg("-C")
             .arg(&self.repo_path)
             .args(&self.args)
+            .stdin(Stdio::null())
+            .env("GIT_TERMINAL_PROMPT", "0")
             .output()
         {
             Ok(output) => CommandResult::Executed {
