@@ -1,9 +1,6 @@
 use anyhow::Result;
-use rayon::prelude::*;
-use std::io::{self, Write};
 use std::path::PathBuf;
-use std::process::{Command, Output, Stdio};
-use std::sync::Mutex;
+use std::process::{Child, Command, Output, Stdio};
 
 use crate::repo::repo_name;
 
@@ -21,13 +18,12 @@ fn format_repo_name(name: &str) -> String {
 
 /// Execution context holding configuration for running git commands
 pub struct ExecutionContext {
-    workers: usize,
     dry_run: bool,
 }
 
 impl ExecutionContext {
-    pub fn new(workers: usize, dry_run: bool) -> Self {
-        Self { workers, dry_run }
+    pub fn new(dry_run: bool) -> Self {
+        Self { dry_run }
     }
 
     pub fn is_dry_run(&self) -> bool {
@@ -55,41 +51,19 @@ impl GitCommand {
         )
     }
 
-    /// Execute the git command, respecting dry-run mode
-    pub fn execute(&self, dry_run: bool) -> CommandResult {
-        // Single code path: build the command string first
-        let cmd_str = self.command_string();
-
-        if dry_run {
-            return CommandResult::DryRun(cmd_str);
-        }
-
-        // Actually execute
-        match Command::new("git")
+    /// Spawn the git command without waiting for completion.
+    /// Returns immediately with a Child process handle.
+    pub fn spawn(&self) -> std::io::Result<Child> {
+        Command::new("git")
             .arg("-C")
             .arg(&self.repo_path)
             .args(&self.args)
             .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .env("GIT_TERMINAL_PROMPT", "0")
-            .output()
-        {
-            Ok(output) => CommandResult::Executed {
-                repo_name: repo_name(&self.repo_path),
-                output,
-            },
-            Err(e) => CommandResult::Error {
-                repo_name: repo_name(&self.repo_path),
-                message: e.to_string(),
-            },
-        }
+            .spawn()
     }
-}
-
-/// Result of executing a git command
-pub enum CommandResult {
-    DryRun(String),
-    Executed { repo_name: String, output: Output },
-    Error { repo_name: String, message: String },
 }
 
 /// Trait for formatting command output into one line
@@ -97,7 +71,15 @@ pub trait OutputFormatter: Sync {
     fn format(&self, output: &Output) -> String;
 }
 
-/// Run commands in parallel across all repos
+/// A spawned git process with its associated repo info
+struct SpawnedCommand {
+    repo_path: PathBuf,
+    child: Result<Child, std::io::Error>,
+}
+
+/// Run commands in parallel across all repos using spawn-first pattern.
+/// All git processes are spawned immediately, then results are collected
+/// and printed in deterministic (repo) order.
 pub fn run_parallel<F>(
     ctx: &ExecutionContext,
     repos: &[PathBuf],
@@ -105,37 +87,44 @@ pub fn run_parallel<F>(
     formatter: &dyn OutputFormatter,
 ) -> Result<()>
 where
-    F: Fn(&PathBuf) -> GitCommand + Sync,
+    F: Fn(&PathBuf) -> GitCommand,
 {
-    // Build thread pool with specified worker count
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(ctx.workers)
-        .build()?;
-
-    // Use a mutex to ensure clean output (no interleaving)
-    let stdout = Mutex::new(io::stdout());
-
-    pool.install(|| {
-        repos.par_iter().for_each(|repo| {
+    // Handle dry-run mode separately
+    if ctx.is_dry_run() {
+        for repo in repos {
             let cmd = build_command(repo);
-            let result = cmd.execute(ctx.is_dry_run());
+            println!("{}", cmd.command_string());
+        }
+        return Ok(());
+    }
 
-            let output_line = match result {
-                CommandResult::DryRun(cmd_str) => cmd_str,
-                CommandResult::Executed { repo_name, output } => {
+    // Phase 1: Spawn all git processes immediately (non-blocking)
+    let spawned: Vec<SpawnedCommand> = repos
+        .iter()
+        .map(|repo| {
+            let cmd = build_command(repo);
+            SpawnedCommand {
+                repo_path: repo.clone(),
+                child: cmd.spawn(),
+            }
+        })
+        .collect();
+
+    // Phase 2: Wait for each process and print results in order
+    for spawned_cmd in spawned {
+        let name = repo_name(&spawned_cmd.repo_path);
+        let output_line = match spawned_cmd.child {
+            Ok(child) => match child.wait_with_output() {
+                Ok(output) => {
                     let formatted = formatter.format(&output);
-                    format!("{} {}", format_repo_name(&repo_name), formatted)
+                    format!("{} {}", format_repo_name(&name), formatted)
                 }
-                CommandResult::Error { repo_name, message } => {
-                    format!("{} ERROR: {}", format_repo_name(&repo_name), message)
-                }
-            };
-
-            // Lock stdout and print atomically
-            let mut handle = stdout.lock().unwrap();
-            writeln!(handle, "{}", output_line).ok();
-        });
-    });
+                Err(e) => format!("{} ERROR: {}", format_repo_name(&name), e),
+            },
+            Err(e) => format!("{} ERROR: spawn failed: {}", format_repo_name(&name), e),
+        };
+        println!("{}", output_line);
+    }
 
     Ok(())
 }

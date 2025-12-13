@@ -12,10 +12,6 @@ use runner::ExecutionContext;
 #[derive(Parser)]
 #[command(name = "nit", version, about = "parallel git across many repositories")]
 struct Cli {
-    /// Number of parallel workers
-    #[arg(short = 'n', long, default_value_t = 8)]
-    workers: usize,
-
     /// Print exact commands without executing
     #[arg(long)]
     dry_run: bool,
@@ -58,7 +54,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let ctx = ExecutionContext::new(cli.workers, cli.dry_run);
+    let ctx = ExecutionContext::new(cli.dry_run);
 
     if cli.dry_run {
         println!(
