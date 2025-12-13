@@ -180,6 +180,47 @@ These network operations *do* modify refs:
 
 For nit's fetch/pull: Don't use `--no-optional-locks` (it wouldn't help and the network latency dominates).
 
+## GitHub Concurrent Connection Limits
+
+GitHub imposes limits on concurrent connections, though they don't publish exact numbers. This affects tools like nit that spawn many parallel git operations.
+
+### SSH Connections
+
+SSH connections to GitHub can hit multiplexing limits. The error:
+```
+mux_client_request_session: session request failed: Session open refused by peer
+```
+indicates GitHub refused to open another session on the multiplexed connection.
+
+### HTTPS Connections
+
+GitHub states they have "no hard limits" for git operations over HTTPS, but will throttle/delay requests that could cause server overload:
+
+> "Git operations do not consume part of your API rate limit... we don't have any hard limits for clones, though we may delay requests if they come in fast enough to potentially cause overload."
+
+However, users report connection resets when cloning many repositories in parallel.
+
+### Practical Limits
+
+The [git-xargs](https://github.com/gruntwork-io/git-xargs) tool, which performs bulk git operations, defaults to **4 concurrent connections** after experiencing issues with higher parallelism.
+
+| Protocol | Observed Safe Limit | Notes |
+|----------|---------------------|-------|
+| SSH | ~10 | Limited by SSH multiplexing |
+| HTTPS | ~10-20 | More tolerant than SSH |
+
+### Recommendations for nit
+
+1. **Default to 8-10 concurrent connections** for network operations (fetch/pull)
+2. **Provide `--max-connections` flag** to override for local git servers or when using HTTPS
+3. **Local operations (status) can remain unlimited** since they don't hit GitHub
+
+### References
+
+* [GitHub Community: Git clone limits discussion](https://github.com/orgs/community/discussions/24841)
+* [git-xargs: Rate limiting for repository cloning](https://github.com/gruntwork-io/git-xargs/issues/139)
+* [git-xargs: Rate limit implementation](https://github.com/gruntwork-io/git-xargs/pull/142)
+
 ## Performance Impact Summary
 
 | Flag/Config | Single Operation | Parallel Operations |
