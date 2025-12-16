@@ -34,9 +34,10 @@ discover_impl_dirs() {
 get_build_cmd() {
     local impl="$1"
     case "$impl" in
-        rust) echo "cargo build --release" ;;
-        zig)  echo "zig build" ;;
-        *)    return 1 ;;
+        rust)    echo "cargo build --release" ;;
+        zig)     echo "zig build" ;;
+        crystal) echo "shards build --release" ;;
+        *)       return 1 ;;
     esac
 }
 
@@ -44,9 +45,10 @@ get_build_cmd() {
 get_test_cmd() {
     local impl="$1"
     case "$impl" in
-        rust) echo "cargo test" ;;
-        zig)  echo "zig build test" ;;
-        *)    return 1 ;;
+        rust)    echo "cargo test" ;;
+        zig)     echo "zig build test" ;;
+        crystal) echo "crystal spec" ;;
+        *)       return 1 ;;
     esac
 }
 

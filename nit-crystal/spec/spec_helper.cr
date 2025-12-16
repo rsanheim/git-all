@@ -1,0 +1,5 @@
+require "spec"
+require "file_utils"
+require "../src/repo"
+require "../src/runner"
+require "../src/commands/*"
