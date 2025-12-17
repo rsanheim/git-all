@@ -1,4 +1,4 @@
-# Shared library for nit benchmark scripts
+# Shared library for nit scripts
 # Source this file: source "$(dirname "$0")/lib.sh"
 
 set -euo pipefail
@@ -35,7 +35,7 @@ get_build_cmd() {
     local impl="$1"
     case "$impl" in
         rust)    echo "cargo build --release" ;;
-        zig)     echo "zig build" ;;
+        zig)     echo "zig build --release=fast" ;;
         crystal) echo "shards build --release" ;;
         *)       return 1 ;;
     esac
@@ -56,4 +56,15 @@ get_test_cmd() {
 get_impl_dir() {
     local impl="$1"
     echo "${NIT_ROOT}/nit-${impl}"
+}
+
+# Get binary output path for implementation type (after release build)
+get_binary_path() {
+    local impl="$1"
+    case "$impl" in
+        rust)    echo "${NIT_ROOT}/nit-rust/target/release/nit" ;;
+        zig)     echo "${NIT_ROOT}/nit-zig/zig-out/bin/nit" ;;
+        crystal) echo "${NIT_ROOT}/nit-crystal/bin/nit" ;;
+        *)       return 1 ;;
+    esac
 }
