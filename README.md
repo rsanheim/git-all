@@ -115,12 +115,17 @@ etc...
 
 ## Project structure and implementation notes
 
-Language implementations should go into a corresponding subdir, i.e. ./rust, ./ruby, etc.
-If there are multiple implementations per language, they can just use a more speicifc name, ie `./ruby-fibers`
-ALL binairies/scripts for the end-result should be runnable via a wrapper bash script in ./bin/ - 
-so `./bin/nit-ruby` should run the ruby implementation, etc.
+Language implementations should go into a corresponding subdir, i.e. `./nit-rust`, `./nit-zig`, etc.
+All binaries are runnable via wrapper scripts in `./bin/` (e.g., `./bin/nit-rust`).
 
-Any scripts for benchmarking or housekeeping should into ./scripts. We can assume hyperfine is installed, and should use it!
+### Scripts
+
+* `script/build` - Build implementations (optimized release builds by default)
+* `script/install` - Build and install to `~/.local/bin`
+* `script/test` - Run tests for implementations
+* `script/bench` - Run benchmarks with hyperfine
+
+Run any script with `--help` for detailed options.
 
 We use `mise` for installing tools and dependencies.
 

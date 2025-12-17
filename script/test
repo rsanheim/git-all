@@ -57,6 +57,14 @@ run_tests() {
             (cd "$dir" && zig build test "${zig_opts[@]}")
             status=$?
             ;;
+        crystal)
+            local crystal_opts=()
+            if $VERBOSE; then
+                crystal_opts+=("--verbose")
+            fi
+            (cd "$dir" && crystal spec "${crystal_opts[@]}")
+            status=$?
+            ;;
         *)
             echo "Unknown implementation: $impl"
             return 1

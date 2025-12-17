@@ -22,7 +22,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```
 
 All binaries should be runnable via `./bin/nit-<language>`.
-Use `script/build -t <type>` to build implementations.
+
+## Scripts
+
+* `script/build` - Build implementations (optimized by default)
+* `script/install` - Build and install to `~/.local/bin`
+* `script/test` - Run tests
+* `script/bench` - Run benchmarks with hyperfine
+
+Run any script with `--help` for options.
 
 ## Development Tools
 

@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Build optimized releases and install to ~/.local/bin
+source "$(dirname "$0")/lib.sh"
+
+INSTALL_DIR="${HOME}/.local/bin"
+
+show_help() {
+    local impls
+    impls=$(discover_impl_names | tr '\n' ', ' | sed 's/,$//' | sed 's/,/, /g')
+    cat <<EOF
+install - Build and install nit binaries
+
+Usage: install [options]
+
+Options:
+  -t, --type TYPE    Build specific type: ${impls}, or all (default: rust)
+  -l, --list         List available implementations
+  -h, --help         Show this help message
+
+Builds optimized release binaries and installs to ${INSTALL_DIR}
+
+Examples:
+  install                  # Build and install Rust (as 'nit')
+  install -t zig           # Build and install Zig (as 'nit-zig')
+  install -t all           # Build and install all implementations
+EOF
+}
+
+list_implementations() {
+    echo "Available implementations:"
+    for impl in $(discover_impl_names); do
+        local dir
+        dir=$(get_impl_dir "$impl")
+        echo "  $impl  ($dir)"
+    done
+}
+
+TYPE="rust"
+
+main() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            -t|--type)
+                TYPE="$2"
+                shift 2
+                ;;
+            -l|--list)
+                list_implementations
+                exit 0
+                ;;
+            *)
+                echo "Unknown option: $1"
+                echo "Run 'install --help' for usage."
+                exit 1
+                ;;
+        esac
+    done
+
+    # Build using script/build
+    echo "=== Building optimized release ==="
+    "${SCRIPT_DIR}/build" -t "$TYPE" || exit 1
+
+    # Ensure install dir exists
+    mkdir -p "$INSTALL_DIR"
+
+    echo "=== Installing to ${INSTALL_DIR} ==="
+
+    local impls
+    if [[ "$TYPE" == "all" ]]; then
+        impls=$(discover_impl_names)
+    else
+        impls="$TYPE"
+    fi
+
+    for impl in $impls; do
+        local binary
+        if ! binary=$(get_binary_path "$impl"); then
+            echo "Unknown impl for install: $impl"
+            continue
+        fi
+
+        if [[ ! -f "$binary" ]]; then
+            echo "Binary not found: $binary"
+            continue
+        fi
+
+        # Rust gets installed as 'nit', others as 'nit-<impl>'
+        local dest="${INSTALL_DIR}/nit"
+        if [[ "$impl" != "rust" ]]; then
+            dest="${INSTALL_DIR}/nit-${impl}"
+        fi
+
+        cp "$binary" "$dest"
+        chmod +x "$dest"
+        echo "Installed: $dest"
+    done
+
+    echo
+    echo "Done! Run 'nit --help' to verify."
+}
+
+main "$@"
