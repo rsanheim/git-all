@@ -39,10 +39,10 @@ COMMANDS:
    help, h          Shows a list of commands or help for one command
 
 GLOBAL OPTIONS:
-   -n, --max-connections N  Maximum concurrent git processes (default: 8, 0 = unlimited)
-   --dry-run                Print the **exact** command for every repo without running it
-   --ssh                    Force SSH URLs (git@github.com:) for all remotes
-   --https                  Force HTTPS URLs (https://github.com/) for all remotes
+   -n, --workers N   Number of parallel workers (default: 8, 0 = unlimited)
+   --dry-run         Print the **exact** command for every repo without running it
+   --ssh             Force SSH URLs (git@github.com:) for all remotes
+   --https           Force HTTPS URLs (https://github.com/) for all remotes
 
 ```
 

@@ -52,8 +52,8 @@ Spawn all git processes immediately (non-blocking), then collect results. This m
 ## Global CLI Options
 
 ```
---dry-run                Print exact commands without executing
---ssh                    Force SSH URLs for remotes
---https                  Force HTTPS URLs for remotes
--n, --max-connections N  Maximum parallel git processes (default: 8)
+--dry-run          Print exact commands without executing
+--ssh              Force SSH URLs for remotes
+--https            Force HTTPS URLs for remotes
+-n, --workers N    Number of parallel workers (default: 8)
 ```

@@ -180,7 +180,7 @@ else:
 
 3. These flags MUST be mutually exclusive.
 
-### 6.3 --workers / -n / --max-connections
+### 6.3 --workers / -n
 
 1. This option MUST accept a non-negative integer.
 
@@ -236,7 +236,6 @@ OPTIONS:
     --ssh
     --https
     -n, --workers <N>
-    --max-connections <N>
     -d, --depth <N|all>
     -h, --help
     -V, --version

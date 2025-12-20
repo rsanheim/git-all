@@ -34,8 +34,8 @@ OPTIONS
         Default: 1 (immediate subdirectories only)
         **Status: Not yet implemented**
 
-    -n, --max-connections <N>
-        Maximum concurrent git processes.
+    -n, --workers <N>
+        Number of parallel workers.
         Default: 8 (0 = unlimited)
 
     --dry-run
