@@ -27,8 +27,25 @@ jobs:
           command: crystal spec
           working_directory: nit-crystal
 
+  test-zig:
+    docker:
+      - image: cimg/base:current
+    steps:
+      - checkout
+      - run:
+          name: Install Zig 0.15.2
+          command: |
+            curl -L https://ziglang.org/download/0.15.2/zig-linux-x86_64-0.15.2.tar.xz | tar -xJ
+            sudo mv zig-linux-x86_64-0.15.2 /opt/zig
+            echo 'export PATH=/opt/zig:$PATH' >> "$BASH_ENV"
+      - run:
+          name: Run tests
+          command: zig build test
+          working_directory: nit-zig
+
 workflows:
   test:
     jobs:
       - test-rust
       - test-crystal
+      - test-zig
