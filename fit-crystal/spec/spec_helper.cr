@@ -1,5 +1,7 @@
 require "spec"
 require "file_utils"
+require "../src/version"
 require "../src/repo"
 require "../src/runner"
 require "../src/commands/*"
+require "../src/meta"

@@ -1,10 +1,9 @@
 require "option_parser"
+require "./version"
 require "./repo"
 require "./runner"
 require "./commands/*"
-
-VERSION = "0.3.0"
-DEFAULT_WORKERS = 8
+require "./meta"
 
 enum UrlScheme
   SSH
@@ -85,7 +84,7 @@ def parse_args(argv : Array(String)) : Options
     end
 
     p.on("-V", "--version", "Print version") do
-      puts "fit #{VERSION}"
+      puts "fit #{Fit::VERSION}"
       exit 0
     end
 
@@ -105,6 +104,12 @@ def parse_args(argv : Array(String)) : Options
 end
 
 def main
+  # Meta mode: handle fit-internal commands BEFORE passthrough check
+  # Per SPEC.md 1.0: "Before anything else..."
+  if Meta.dispatch(ARGV)
+    exit 0
+  end
+
   # Passthrough mode: if inside a git repo, just exec git
   if is_inside_git_repo?
     passthrough_to_git(ARGV)
