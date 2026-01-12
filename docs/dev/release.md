@@ -90,7 +90,16 @@ The formula never knows what language built the binary.
 
 ## TODO
 
-Remaining tasks to complete Homebrew distribution:
+### Make fit repo public
+
+* [ ] Audit repo for sensitive content (secrets, credentials, personal paths)
+* [ ] Review git history for anything that should be scrubbed
+* [ ] Add LICENSE file (MIT)
+* [ ] Review and clean up documentation
+* [ ] Update README with project overview and usage
+* [ ] Make repo public on GitHub
+
+### Homebrew distribution
 
 * [ ] Create `rsanheim/homebrew-tap` repository on GitHub
 * [ ] Push homebrew-tap initial commit
@@ -98,4 +107,3 @@ Remaining tasks to complete Homebrew distribution:
 * [ ] Create first release (`script/release 0.3.0` or bump to 0.4.0)
 * [ ] Update tap with real SHA256 hashes (`script/update-homebrew`)
 * [ ] Test installation: `brew tap rsanheim/tap && brew install fit`
-* [ ] Add LICENSE file to fit repo (MIT)
