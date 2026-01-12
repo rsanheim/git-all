@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# Update Homebrew formula after a release
+source "$(dirname "$0")/lib.sh"
+
+DRY_RUN=false
+VERSION=""
+TAP_PATH="${TAP_PATH:-${HOME}/src/rsanheim/homebrew-tap}"
+
+show_help() {
+    cat <<EOF
+update-homebrew - Update Homebrew formula after a release
+
+Usage: update-homebrew [options] <version>
+
+Options:
+  --dry-run        Print commands without executing
+  -h, --help       Show this help message
+
+Arguments:
+  version          Version number (e.g., 0.4.0)
+
+Environment:
+  TAP_PATH         Path to homebrew-tap repo (default: ~/src/rsanheim/homebrew-tap)
+
+Examples:
+  update-homebrew 0.4.0            # Update formula for version 0.4.0
+  update-homebrew --dry-run 0.4.0  # Show what would happen
+EOF
+}
+
+run() {
+    if $DRY_RUN; then
+        echo "[dry-run] $*"
+    else
+        "$@"
+    fi
+}
+
+main() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            --dry-run)
+                DRY_RUN=true
+                shift
+                ;;
+            -*)
+                echo "Unknown option: $1"
+                echo "Run 'update-homebrew --help' for usage."
+                exit 1
+                ;;
+            *)
+                VERSION="$1"
+                shift
+                ;;
+        esac
+    done
+
+    if [[ -z "$VERSION" ]]; then
+        echo "Error: version required"
+        echo "Run 'update-homebrew --help' for usage."
+        exit 1
+    fi
+
+    echo "=== Updating Homebrew formula for v${VERSION} ==="
+
+    # Download and compute SHA256
+    local ARM64_URL="https://github.com/rsanheim/fit/releases/download/v${VERSION}/fit-${VERSION}-darwin-arm64.tar.gz"
+    local X86_64_URL="https://github.com/rsanheim/fit/releases/download/v${VERSION}/fit-${VERSION}-darwin-x86_64.tar.gz"
+
+    echo "Computing SHA256 hashes..."
+    echo ""
+
+    echo "Downloading arm64 tarball..."
+    local ARM64_SHA
+    ARM64_SHA=$(curl -sL "$ARM64_URL" | shasum -a 256 | cut -d' ' -f1)
+
+    echo "Downloading x86_64 tarball..."
+    local X86_64_SHA
+    X86_64_SHA=$(curl -sL "$X86_64_URL" | shasum -a 256 | cut -d' ' -f1)
+
+    echo ""
+    echo "SHA256 hashes:"
+    echo "  arm64:  ${ARM64_SHA}"
+    echo "  x86_64: ${X86_64_SHA}"
+    echo ""
+
+    local FORMULA="${TAP_PATH}/Formula/fit.rb"
+
+    if [[ ! -f "$FORMULA" ]]; then
+        echo "Formula not found at ${FORMULA}"
+        echo "Set TAP_PATH or create the tap first."
+        exit 1
+    fi
+
+    echo "Updating formula..."
+    run sed -i '' "s/version \".*\"/version \"${VERSION}\"/" "$FORMULA"
+
+    # Update SHA256 for arm64 (first sha256 line)
+    # Update SHA256 for x86_64 (second sha256 line)
+    # This is simplified - sed replacement of sha256 values in order
+    run sed -i '' "0,/sha256 \"[a-f0-9]*\"/s/sha256 \"[a-f0-9]*\"/sha256 \"${ARM64_SHA}\"/" "$FORMULA"
+    run sed -i '' "s/sha256 \"PLACEHOLDER\"/sha256 \"${X86_64_SHA}\"/" "$FORMULA"
+
+    echo ""
+    if $DRY_RUN; then
+        echo "Dry run complete. No changes made."
+    else
+        echo "Formula updated!"
+        echo ""
+        echo "Next steps:"
+        echo "  cd ${TAP_PATH}"
+        echo "  git diff  # verify changes"
+        echo "  git add -A && git commit -m 'fit ${VERSION}' && git push"
+    fi
+}
+
+main "$@"

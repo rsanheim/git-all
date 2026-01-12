@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# Release a new version of fit
+source "$(dirname "$0")/lib.sh"
+
+DRY_RUN=false
+VERSION=""
+
+show_help() {
+    cat <<EOF
+release - Release a new version of fit
+
+Usage: release [options] <version>
+
+Options:
+  --dry-run        Print commands without executing
+  -h, --help       Show this help message
+
+Arguments:
+  version          Version number (e.g., 0.4.0)
+
+Examples:
+  release 0.4.0            # Release version 0.4.0
+  release --dry-run 0.4.0  # Show what would happen
+EOF
+}
+
+run() {
+    if $DRY_RUN; then
+        echo "[dry-run] $*"
+    else
+        "$@"
+    fi
+}
+
+main() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            --dry-run)
+                DRY_RUN=true
+                shift
+                ;;
+            -*)
+                echo "Unknown option: $1"
+                echo "Run 'release --help' for usage."
+                exit 1
+                ;;
+            *)
+                VERSION="$1"
+                shift
+                ;;
+        esac
+    done
+
+    if [[ -z "$VERSION" ]]; then
+        echo "Error: version required"
+        echo "Run 'release --help' for usage."
+        exit 1
+    fi
+
+    # Validate version format
+    if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "Error: Version must be in format X.Y.Z (e.g., 0.4.0)"
+        exit 1
+    fi
+
+    echo "=== Releasing v${VERSION} ==="
+
+    # Update Cargo.toml version
+    run sed -i '' "s/^version = \".*\"/version = \"${VERSION}\"/" "${FIT_ROOT}/fit-rust/Cargo.toml"
+
+    # Commit version bump
+    run git add "${FIT_ROOT}/fit-rust/Cargo.toml"
+    run git commit -m "Bump version to ${VERSION}"
+
+    # Create and push tag
+    run git tag "v${VERSION}"
+    run git push origin main "v${VERSION}"
+
+    echo ""
+    if $DRY_RUN; then
+        echo "Dry run complete. No changes made."
+    else
+        echo "Release v${VERSION} triggered!"
+        echo "GitHub Actions will build and publish artifacts."
+        echo ""
+        echo "After release completes, update the tap formula:"
+        echo "  script/update-homebrew ${VERSION}"
+    fi
+}
+
+main "$@"
