@@ -111,9 +111,9 @@ script/test -t rust      # Test
 
 See [docs/SPEC.md](docs/SPEC.md) for the formal specification, [docs/dev/](docs/dev/) for contributor documentation, and [CircleCI](https://app.circleci.com/pipelines/github/rsanheim/fit) for build status.
 
-**scary AI warning** I've developed this using ai driven agents, and I also program a lot. Its been fun to see what LLMs can do with something like a formal(ish) specificaiton across languages I don't know (Rust, Zig) and languages I do know (Ruby, Go, Crystal).
+**scary AI warning** I built this with much help from AI agents. Its been fun to see what LLMs can do with something like a formal(ish) specifications across languages I don't know (Rust, Zig) and languages I do know (Ruby, Go, Crystal). 
 
-FWIW, I use this tool everyday, so I know it does work :smiley:
+FWIW, I use `fit` everyday, so it isn't just an ai toy thing.
 
 ## License
 

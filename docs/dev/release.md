@@ -161,16 +161,16 @@ Warning: This rewrites all commit SHAs, breaks PR references, and requires all c
 
 #### Finalize for public release
 
-* [ ] Add LICENSE file (MIT)
-* [ ] Review and clean up documentation
-* [ ] Update README with project overview and usage
+* [x] Add LICENSE file (MIT)
+* [x] Review and clean up documentation
+* [x] Update README with project overview and usage
 * [ ] Make repo public on GitHub
 
 ### Homebrew distribution
 
-* [ ] Create `rsanheim/homebrew-tap` repository on GitHub
-* [ ] Push homebrew-tap initial commit
+* [x] Create `rsanheim/homebrew-tap` repository on GitHub
+* [x] Push homebrew-tap initial commit
 * [ ] Merge `release-workflow` branch in fit repo
-* [ ] Create first release (`script/release 0.3.0` or bump to 0.4.0)
-* [ ] Update tap with real SHA256 hashes (`script/update-homebrew`)
+* [ ] Create first release (`script/release 0.5.0`)
+* [ ] Update tap with real SHA256 hashes (`script/update-homebrew 0.5.0`)
 * [ ] Test installation: `brew tap rsanheim/tap && brew install fit`
