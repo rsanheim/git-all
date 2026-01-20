@@ -1,18 +1,22 @@
 version: 2.1
 
-orbs:
-  rust: circleci/rust@1
-
 jobs:
   test-rust:
-    executor:
-      name: rust/default
-      tag: "1.92"
+    docker:
+      - image: cimg/rust:1.92.0
     resource_class: rsanheim/orbstack-arm64
     steps:
       - checkout
-      - rust/test:
-          working_directory: ~/project/fit-rust
+      - run:
+          name: Debug - Rust environment
+          command: |
+            uname -m
+            rustc -Vv
+            cargo -V
+      - run:
+          name: Run Rust tests
+          command: cargo test
+          working_directory: fit-rust
 
   test-crystal:
     docker:
@@ -38,9 +42,18 @@ jobs:
       - run:
           name: Install Zig 0.15.2
           command: |
-            curl -L https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz | tar -xJ
-            sudo mv zig-x86_64-linux-0.15.2 /opt/zig
+            set -euo pipefail
+            arch="$(uname -m)"
+            case "$arch" in
+              x86_64) zig_arch="x86_64" ;;
+              aarch64|arm64) zig_arch="aarch64" ;;
+              *) echo "Unsupported arch: $arch" >&2; exit 1 ;;
+            esac
+            curl -fsSL "https://ziglang.org/download/0.15.2/zig-${zig_arch}-linux-0.15.2.tar.xz" | tar -xJ
+            sudo mv "zig-${zig_arch}-linux-0.15.2" /opt/zig
             echo 'export PATH=/opt/zig:$PATH' >> "$BASH_ENV"
+            /opt/zig/zig version
+            file /opt/zig/zig
       - run:
           name: Run tests
           command: zig build test
