@@ -1,4 +1,5 @@
 version: 2.1
+resource_class: rsanheim/orbstack-arm64
 
 orbs:
   rust: circleci/rust@1
