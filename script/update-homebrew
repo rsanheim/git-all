@@ -99,11 +99,20 @@ main() {
     echo "Updating formula..."
     run sed -i '' "s/version \".*\"/version \"${VERSION}\"/" "$FORMULA"
 
-    # Update SHA256 for arm64 (first sha256 line)
-    # Update SHA256 for x86_64 (second sha256 line)
-    # This is simplified - sed replacement of sha256 values in order
-    run sed -i '' "0,/sha256 \"[a-f0-9]*\"/s/sha256 \"[a-f0-9]*\"/sha256 \"${ARM64_SHA}\"/" "$FORMULA"
-    run sed -i '' "s/sha256 \"PLACEHOLDER\"/sha256 \"${X86_64_SHA}\"/" "$FORMULA"
+    # Update SHA256 hashes using awk (portable, unlike GNU sed's 0,/pattern/)
+    # First sha256 = arm64, second sha256 = x86_64
+    if $DRY_RUN; then
+        echo "[dry-run] awk (update sha256 hashes) $FORMULA"
+    else
+        awk -v arm64="$ARM64_SHA" -v x86="$X86_64_SHA" '
+            /sha256 "/ {
+                n++
+                if (n == 1) sub(/sha256 "[^"]*"/, "sha256 \"" arm64 "\"")
+                if (n == 2) sub(/sha256 "[^"]*"/, "sha256 \"" x86 "\"")
+            }
+            { print }
+        ' "$FORMULA" > "${FORMULA}.tmp" && mv "${FORMULA}.tmp" "$FORMULA"
+    fi
 
     echo ""
     if $DRY_RUN; then
