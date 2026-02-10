@@ -112,7 +112,7 @@ fn main() -> Result<()> {
     let repos = find_git_repos_in(&cwd, cli.scan_depth)?;
     if repos.is_empty() {
         println!("No git repositories found in current directory");
-        return Ok(());
+        std::process::exit(9);
     }
 
     let url_scheme = if cli.ssh {

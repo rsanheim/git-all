@@ -40,6 +40,8 @@ impl Semaphore {
 
 const MIN_REPO_NAME_WIDTH: usize = 4;
 const MAX_REPO_NAME_WIDTH_CAP: usize = 48;
+const MIN_BRANCH_WIDTH: usize = 4;
+const MAX_BRANCH_WIDTH_CAP: usize = 24;
 
 /// URL scheme to force for git operations
 #[derive(Clone, Copy)]
@@ -50,7 +52,7 @@ pub enum UrlScheme {
     Https,
 }
 
-/// Format repo name with fixed width: truncate long names, pad short ones
+/// Compute the display width for the repo name column
 fn compute_name_width(repos: &[PathBuf], display_root: &Path) -> usize {
     let mut max_len = 0usize;
     for repo in repos {
@@ -62,18 +64,54 @@ fn compute_name_width(repos: &[PathBuf], display_root: &Path) -> usize {
     capped.max(MIN_REPO_NAME_WIDTH)
 }
 
-/// Format repo name with fixed width: truncate long names, pad short ones
-fn format_repo_name(name: &str, width: usize) -> String {
-    let display_name = if name.len() > width {
-        if width <= 4 {
-            name.chars().take(width).collect()
+/// Compute the display width for the branch column
+fn compute_branch_width(results: &[(String, String, String)]) -> usize {
+    let max_len = results
+        .iter()
+        .map(|(_, branch, _)| branch.len())
+        .max()
+        .unwrap_or(0);
+    let capped = max_len.min(MAX_BRANCH_WIDTH_CAP);
+    capped.max(MIN_BRANCH_WIDTH)
+}
+
+/// Format a value into a fixed-width column: truncate with `...`, pad short values
+fn format_column(value: &str, width: usize) -> String {
+    if value.len() > width {
+        if width <= 3 {
+            value.chars().take(width).collect()
         } else {
-            format!("{}-...", &name[..width - 4])
+            let truncated: String = value.chars().take(width - 3).collect();
+            format!("{truncated}...")
         }
     } else {
-        name.to_string()
-    };
-    format!("[{:<width$}]", display_name, width = width)
+        format!("{value:<width$}")
+    }
+}
+
+/// Resolve the current branch name for a repository
+fn resolve_branch(repo_path: &Path) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output();
+
+    match output {
+        Ok(output) if output.status.success() => {
+            let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if branch == "HEAD" {
+                "HEAD (detached)".to_string()
+            } else {
+                branch
+            }
+        }
+        _ => "unknown".to_string(),
+    }
 }
 
 /// Execution context holding configuration for running git commands
@@ -119,12 +157,31 @@ impl ExecutionContext {
 /// A git command ready to be executed against a repository
 pub struct GitCommand {
     pub repo_path: PathBuf,
+    /// Global git options placed before `-C` (e.g., `--no-optional-locks`)
+    pub global_args: Vec<String>,
+    /// Subcommand and its arguments placed after `-C <repo>`
     pub args: Vec<String>,
 }
 
 impl GitCommand {
     pub fn new(repo_path: PathBuf, args: Vec<String>) -> Self {
-        Self { repo_path, args }
+        Self {
+            repo_path,
+            global_args: Vec::new(),
+            args,
+        }
+    }
+
+    pub fn with_global_args(
+        repo_path: PathBuf,
+        global_args: Vec<String>,
+        args: Vec<String>,
+    ) -> Self {
+        Self {
+            repo_path,
+            global_args,
+            args,
+        }
     }
 
     /// Spawn the git command without waiting for completion.
@@ -146,6 +203,9 @@ impl GitCommand {
             }
         }
 
+        // Global git options before -C
+        cmd.args(&self.global_args);
+
         cmd.arg("-C")
             .arg(&self.repo_path)
             .args(&self.args)
@@ -163,25 +223,37 @@ impl GitCommand {
             Some(UrlScheme::Https) => "-c \"url.https://github.com/.insteadOf=git@github.com:\" ",
             None => "",
         };
+        let global = if self.global_args.is_empty() {
+            String::new()
+        } else {
+            format!("{} ", self.global_args.join(" "))
+        };
         format!(
-            "git {}-C {} {}",
+            "git {}{}-C {} {}",
             scheme_args,
+            global,
             self.repo_path.display(),
             self.args.join(" ")
         )
     }
 }
 
-/// Trait for formatting command output into one line
-pub trait OutputFormatter: Sync {
-    fn format(&self, output: &Output) -> String;
+/// Result of formatting command output for display
+pub struct FormattedResult {
+    pub branch: String,
+    pub message: String,
 }
 
-/// Run commands in parallel across all repos with streaming output.
+/// Trait for formatting command output into a structured result
+pub trait OutputFormatter: Sync {
+    fn format(&self, output: &Output) -> FormattedResult;
+}
+
+/// Run commands in parallel across all repos, collecting results for aligned output.
 ///
-/// Results are printed in alphabetical order (repos are pre-sorted) as soon as
-/// contiguous results are available. Uses head-of-line blocking: if repo "aaa"
-/// is slow, "bbb" and "ccc" won't print until "aaa" completes.
+/// All results are collected before printing to compute column widths.
+/// Each worker thread also resolves the current branch via rev-parse.
+/// Output is printed in alphabetical order (repos are pre-sorted).
 ///
 /// Uses thread-per-process pattern with `wait_with_output()` which is deadlock-safe
 /// (stdlib internally spawns threads to drain stdout/stderr concurrently).
@@ -214,10 +286,6 @@ where
         None
     };
 
-    let mut results: Vec<Option<(PathBuf, Result<Output, std::io::Error>)>> =
-        (0..repos.len()).map(|_| None).collect();
-    let mut next_to_print: usize = 0;
-
     let (tx, rx) = mpsc::channel();
 
     std::thread::scope(|s| {
@@ -232,57 +300,61 @@ where
                     sem.acquire();
                 }
 
+                let branch = resolve_branch(&repo);
                 let result = cmd.spawn(url_scheme).and_then(|c| c.wait_with_output());
 
                 if let Some(ref sem) = sem {
                     sem.release();
                 }
 
-                let _ = tx.send((idx, repo, result));
+                let _ = tx.send((idx, repo, branch, result));
             });
         }
         drop(tx);
 
-        for (idx, repo, result) in rx {
-            results[idx] = Some((repo, result));
+        // Collect all results
+        let mut results: Vec<Option<(PathBuf, String, Result<Output, std::io::Error>)>> =
+            (0..repos.len()).map(|_| None).collect();
 
-            while next_to_print < results.len() {
-                if let Some((ref repo_path, ref res)) = results[next_to_print] {
-                    print_result(
-                        repo_path,
-                        res,
-                        formatter,
-                        ctx.display_root(),
-                        name_width,
-                    );
-                    next_to_print += 1;
-                } else {
-                    break;
+        for (idx, repo, branch, result) in rx {
+            results[idx] = Some((repo, branch, result));
+        }
+
+        // Format all results into (name, branch, message) tuples
+        let formatted: Vec<(String, String, String)> = results
+            .into_iter()
+            .map(|r| {
+                let (repo_path, pre_branch, output_result) = r.unwrap();
+                let name = repo_display_name(&repo_path, ctx.display_root());
+
+                match output_result {
+                    Ok(ref output) => {
+                        let fr = formatter.format(output);
+                        let branch = if fr.branch.is_empty() {
+                            pre_branch
+                        } else {
+                            fr.branch
+                        };
+                        (name, branch, fr.message)
+                    }
+                    Err(ref e) => (name, pre_branch, format!("ERROR: {e}")),
                 }
-            }
+            })
+            .collect();
+
+        let branch_width = compute_branch_width(&formatted);
+
+        for (name, branch, message) in &formatted {
+            println!(
+                "{} | {} | {}",
+                format_column(name, name_width),
+                format_column(branch, branch_width),
+                message
+            );
         }
     });
 
     Ok(())
-}
-
-/// Print result for a single repository
-fn print_result(
-    repo_path: &std::path::Path,
-    result: &Result<Output, std::io::Error>,
-    formatter: &dyn OutputFormatter,
-    display_root: &std::path::Path,
-    name_width: usize,
-) {
-    let name = repo_display_name(repo_path, display_root);
-    let output_line = match result {
-        Ok(output) => {
-            let formatted = formatter.format(output);
-            format!("{} {}", format_repo_name(&name, name_width), formatted)
-        }
-        Err(e) => format!("{} ERROR: {}", format_repo_name(&name, name_width), e),
-    };
-    println!("{}", output_line);
 }
 
 #[cfg(test)]
@@ -290,23 +362,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_format_repo_name_short() {
-        let result = format_repo_name("my-repo", 24);
-        assert_eq!(result, "[my-repo                 ]");
-        assert_eq!(result.len(), 26); // [ + 24 + ]
+    fn test_format_column_short() {
+        let result = format_column("my-repo", 24);
+        assert_eq!(result, "my-repo                 ");
+        assert_eq!(result.len(), 24);
     }
 
     #[test]
-    fn test_format_repo_name_exact_length() {
-        let result = format_repo_name("exactly-twenty-four-chr", 24);
-        assert_eq!(result.len(), 26);
+    fn test_format_column_exact_length() {
+        let result = format_column("exactly-twenty-four-chr!", 24);
+        assert_eq!(result, "exactly-twenty-four-chr!");
+        assert_eq!(result.len(), 24);
     }
 
     #[test]
-    fn test_format_repo_name_truncated() {
-        let result = format_repo_name("this-is-a-very-long-repository-name", 24);
-        assert_eq!(result, "[this-is-a-very-long--...]");
-        assert_eq!(result.len(), 26);
+    fn test_format_column_truncated() {
+        let result = format_column("this-is-a-very-long-repository-name", 24);
+        assert_eq!(result, "this-is-a-very-long-r...");
+        assert_eq!(result.len(), 24);
     }
 
     #[test]
