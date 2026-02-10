@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::mpsc;
@@ -351,6 +352,86 @@ where
                 format_column(branch, branch_width),
                 message
             );
+        }
+    });
+
+    Ok(())
+}
+
+/// Run passthrough commands across all repos, preserving git stdout/stderr output.
+pub fn run_passthrough<F>(
+    ctx: &ExecutionContext,
+    repos: &[PathBuf],
+    build_command: F,
+) -> Result<()>
+where
+    F: Fn(&PathBuf) -> GitCommand + Sync,
+{
+    let url_scheme = ctx.url_scheme();
+
+    if ctx.is_dry_run() {
+        for repo in repos {
+            let cmd = build_command(repo);
+            println!("{}", cmd.command_string_with_scheme(url_scheme));
+        }
+        return Ok(());
+    }
+
+    let max_workers = ctx.max_connections();
+    let semaphore = if max_workers > 0 && max_workers < repos.len() {
+        Some(Arc::new(Semaphore::new(max_workers)))
+    } else {
+        None
+    };
+
+    let (tx, rx) = mpsc::channel();
+
+    std::thread::scope(|s| {
+        for (idx, repo) in repos.iter().enumerate() {
+            let tx = tx.clone();
+            let cmd = build_command(repo);
+            let repo = repo.clone();
+            let sem = semaphore.clone();
+
+            s.spawn(move || {
+                if let Some(ref sem) = sem {
+                    sem.acquire();
+                }
+
+                let result = cmd.spawn(url_scheme).and_then(|c| c.wait_with_output());
+
+                if let Some(ref sem) = sem {
+                    sem.release();
+                }
+
+                let _ = tx.send((idx, repo, result));
+            });
+        }
+        drop(tx);
+
+        let mut results: Vec<Option<(PathBuf, Result<Output, std::io::Error>)>> =
+            (0..repos.len()).map(|_| None).collect();
+
+        for (idx, repo, result) in rx {
+            results[idx] = Some((repo, result));
+        }
+
+        for item in results {
+            let (repo, result) = item.unwrap();
+            match result {
+                Ok(output) => {
+                    let _ = std::io::stdout().write_all(&output.stdout);
+                    let _ = std::io::stderr().write_all(&output.stderr);
+                }
+                Err(err) => {
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "git-all: failed to run git in {}: {}",
+                        repo_display_name(&repo, ctx.display_root()),
+                        err
+                    );
+                }
+            }
         }
     });
 
