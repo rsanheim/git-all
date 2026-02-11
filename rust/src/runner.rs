@@ -41,7 +41,7 @@ impl Semaphore {
 
 const MIN_REPO_NAME_WIDTH: usize = 4;
 const MAX_REPO_NAME_WIDTH_CAP: usize = 48;
-const MAX_BRANCH_WIDTH_CAP: usize = 14;
+const MAX_BRANCH_WIDTH_CAP: usize = 16;
 
 /// URL scheme to force for git operations
 #[derive(Clone, Copy)]

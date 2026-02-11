@@ -237,7 +237,7 @@ Column rules:
 
 1. Each column MUST be left-aligned and padded to a consistent width across all rows.
 2. The repo name column width SHOULD be computed from the actual values in the current run.
-3. The branch column MUST use a fixed width of 14 characters. This enables streaming output without waiting for all results.
+3. The branch column MUST use a fixed width of 16 characters. This enables streaming output without waiting for all results.
 4. Repo and branch columns MUST have a maximum width cap to prevent overly wide output. Values exceeding the cap MUST be truncated with a trailing ellipsis (e.g. `...`).
 4. When scan depth is greater than 1, the repo column MUST display paths relative to the current directory rather than just the leaf directory name.
 5. When scan depth is the default (1), implementations MAY display paths instead of just the leaf name.
@@ -352,7 +352,7 @@ ARGS:
 
 ### v0.2.3 (2026-02-11)
 
-* Changed branch column to fixed width of 14 characters (Section 7.1.1)
+* Changed branch column to fixed width of 16 characters (Section 7.1.1)
 * Added streaming output via head-of-line blocking as RECOMMENDED behavior (Section 3.2)
 
 ### v0.2.2 (2026-02-10)
