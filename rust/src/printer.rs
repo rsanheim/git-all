@@ -1,4 +1,4 @@
-use crossterm::cursor::{MoveTo, MoveToColumn, MoveUp};
+use crossterm::cursor::{MoveToColumn, MoveUp};
 use crossterm::queue;
 use crossterm::terminal::{Clear, ClearType};
 use std::io::{self, Write};
@@ -334,7 +334,6 @@ impl<W: Write> TtyTablePrinter<W> {
 
 impl<W: Write> Printer for TtyTablePrinter<W> {
     fn start(&mut self, rows: &[RepoRow]) -> io::Result<()> {
-        queue!(self.writer, Clear(ClearType::All), MoveTo(0, 0))?;
         self.render_frame(rows, 0)
     }
 
@@ -600,20 +599,6 @@ mod tests {
         assert!(rendered.contains("pending"));
         assert!(!rendered.contains("REPO"));
         assert!(!rendered.contains("OUTPUT"));
-    }
-
-    #[test]
-    fn tty_table_printer_starts_from_a_clear_top_left_screen() {
-        let rows = vec![RepoRow::pending("activities".to_string())];
-        let mut output = Vec::new();
-
-        {
-            let mut printer = TtyTablePrinter::new(&mut output, 6, 80, 14);
-            printer.start(&rows).expect("tty start");
-        }
-
-        let rendered = String::from_utf8(output).expect("utf8");
-        assert!(rendered.starts_with("\u{1b}[2J\u{1b}[1;1H"));
     }
 
     #[test]
