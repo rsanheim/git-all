@@ -1,4 +1,4 @@
-use crossterm::cursor::{MoveToColumn, MoveUp};
+use crossterm::cursor::{MoveTo, MoveToColumn, MoveUp};
 use crossterm::queue;
 use crossterm::terminal::{Clear, ClearType};
 use std::io::{self, Write};
@@ -96,16 +96,15 @@ impl Viewport {
     pub fn with_page_steps(
         rows: &[RepoRow],
         height: usize,
-        previous_start: usize,
+        _previous_start: usize,
         desired_overlap: usize,
     ) -> Self {
         let height = height.max(1);
         let max_start = rows.len().saturating_sub(height);
-        let previous_start = previous_start.min(max_start);
         let Some(anchor) = rows.iter().position(|row| row.state != RowState::Finished) else {
-            let end = (previous_start + height).min(rows.len());
+            let end = (max_start + height).min(rows.len());
             return Self {
-                start: previous_start,
+                start: max_start,
                 end,
             };
         };
@@ -239,7 +238,21 @@ impl<W: Write> TtyTablePrinter<W> {
     }
 
     fn visible_height(&self) -> usize {
-        self.terminal_rows.saturating_sub(2).max(1)
+        self.terminal_rows.saturating_sub(3).max(1)
+    }
+
+    fn terminal_width(&self) -> usize {
+        self.terminal_columns.max(1)
+    }
+
+    fn fit_line(&self, line: &str) -> String {
+        let width = self.terminal_width();
+        if line.len() <= width {
+            return line.to_string();
+        }
+
+        let end = line.floor_char_boundary(width);
+        line[..end].to_string()
     }
 
     fn render_row(&self, row: &RepoRow) -> String {
@@ -278,7 +291,7 @@ impl<W: Write> TtyTablePrinter<W> {
         self.viewport_start = viewport.start;
         for row in &rows[viewport.start..viewport.end] {
             queue!(self.writer, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
-            writeln!(self.writer, "{}", self.render_row(row))?;
+            writeln!(self.writer, "{}", self.fit_line(&self.render_row(row)))?;
         }
 
         let mut complete = 0usize;
@@ -307,11 +320,11 @@ impl<W: Write> TtyTablePrinter<W> {
             elapsed_ms,
         };
         let summary_row = self.render_summary_row(&footer);
-        let separator = "-".repeat(self.terminal_columns.max(summary_row.len()).max(4));
+        let separator = "-".repeat(self.terminal_width());
         queue!(self.writer, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
         writeln!(self.writer, "{}", separator)?;
         queue!(self.writer, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
-        writeln!(self.writer, "{}", summary_row)?;
+        writeln!(self.writer, "{}", self.fit_line(&summary_row))?;
         self.writer.flush()?;
 
         self.rendered_line_count = viewport.end.saturating_sub(viewport.start) + 2;
@@ -321,6 +334,7 @@ impl<W: Write> TtyTablePrinter<W> {
 
 impl<W: Write> Printer for TtyTablePrinter<W> {
     fn start(&mut self, rows: &[RepoRow]) -> io::Result<()> {
+        queue!(self.writer, Clear(ClearType::All), MoveTo(0, 0))?;
         self.render_frame(rows, 0)
     }
 
@@ -367,6 +381,28 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    fn strip_ansi_sequences(input: &str) -> String {
+        let mut stripped = String::new();
+        let mut chars = input.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch != '\u{1b}' {
+                stripped.push(ch);
+                continue;
+            }
+
+            if chars.next() != Some('[') {
+                continue;
+            }
+
+            for code_ch in chars.by_ref() {
+                if code_ch.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        }
+        stripped
     }
 
     #[test]
@@ -513,7 +549,7 @@ mod tests {
     }
 
     #[test]
-    fn viewport_page_step_keeps_final_page_stable_when_all_rows_finish() {
+    fn viewport_page_step_shows_final_page_when_all_rows_finish() {
         let rows = vec![
             RepoRow::finished("activities".to_string(), "clean".to_string()),
             RepoRow::finished("agentic-dev".to_string(), "clean".to_string()),
@@ -522,7 +558,7 @@ mod tests {
             RepoRow::finished("billing".to_string(), "clean".to_string()),
         ];
 
-        let viewport = Viewport::with_page_steps(&rows, 3, 2, 1);
+        let viewport = Viewport::with_page_steps(&rows, 3, 0, 1);
 
         assert_eq!(viewport.start, 2);
         assert_eq!(viewport.end, 5);
@@ -564,6 +600,68 @@ mod tests {
         assert!(rendered.contains("pending"));
         assert!(!rendered.contains("REPO"));
         assert!(!rendered.contains("OUTPUT"));
+    }
+
+    #[test]
+    fn tty_table_printer_starts_from_a_clear_top_left_screen() {
+        let rows = vec![RepoRow::pending("activities".to_string())];
+        let mut output = Vec::new();
+
+        {
+            let mut printer = TtyTablePrinter::new(&mut output, 6, 80, 14);
+            printer.start(&rows).expect("tty start");
+        }
+
+        let rendered = String::from_utf8(output).expect("utf8");
+        assert!(rendered.starts_with("\u{1b}[2J\u{1b}[1;1H"));
+    }
+
+    #[test]
+    fn tty_table_printer_leaves_a_row_for_the_shell_prompt() {
+        let rows = vec![
+            RepoRow::pending("activities".to_string()),
+            RepoRow::pending("agentic-dev".to_string()),
+            RepoRow::pending("amion-api".to_string()),
+            RepoRow::pending("api-gateway".to_string()),
+            RepoRow::pending("billing".to_string()),
+        ];
+        let mut output = Vec::new();
+
+        {
+            let mut printer = TtyTablePrinter::new(&mut output, 6, 80, 14);
+            printer.start(&rows).expect("tty start");
+        }
+
+        let rendered = String::from_utf8(output).expect("utf8");
+        assert_eq!(rendered.lines().count(), 5);
+    }
+
+    #[test]
+    fn tty_table_printer_keeps_printed_lines_within_terminal_width() {
+        let rows = vec![
+            RepoRow::finished("turbo_tests".to_string(), "clean".to_string()),
+            RepoRow::finished("vcr".to_string(), "clean".to_string()),
+            RepoRow::finished("watcher".to_string(), "clean".to_string()),
+            RepoRow::finished("watttt".to_string(), "25 untracked".to_string()),
+            RepoRow::finished(
+                "whatthegem".to_string(),
+                "25 modified, 2 untracked".to_string(),
+            ),
+            RepoRow::finished("yolobox".to_string(), "clean".to_string()),
+            RepoRow::finished("zeitwerk".to_string(), "clean".to_string()),
+        ];
+        let mut output = Vec::new();
+
+        {
+            let mut printer = TtyTablePrinter::new(&mut output, 12, 80, 30);
+            printer.complete(&rows, 6900).expect("tty complete");
+        }
+
+        let rendered = String::from_utf8(output).expect("utf8");
+        let stripped = strip_ansi_sequences(&rendered);
+        for line in stripped.lines() {
+            assert!(line.len() <= 80, "{line:?} was wider than terminal");
+        }
     }
 
     #[test]
@@ -610,7 +708,7 @@ mod tests {
     }
 
     #[test]
-    fn tty_table_printer_separator_scales_past_tiny_terminal_width() {
+    fn tty_table_printer_separator_respects_tiny_terminal_width() {
         let rows = vec![RepoRow::finished(
             "activities".to_string(),
             "clean".to_string(),
@@ -623,7 +721,11 @@ mod tests {
         }
 
         let rendered = String::from_utf8(output).expect("utf8");
-        assert!(rendered.contains("----"));
+        let stripped = strip_ansi_sequences(&rendered);
+        assert!(stripped.lines().any(|line| line == "-"));
+        for line in stripped.lines() {
+            assert!(line.len() <= 1, "{line:?} was wider than terminal");
+        }
     }
 
     #[test]

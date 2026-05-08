@@ -76,7 +76,7 @@ Inside a git repository, `git-all` acts as a transparent wrapper. `git-all statu
 
 ```bash
 $ git-all meta help
-git-all v0.7.1-rc.1 (git 2.52.0)
+git-all v0.7.1-rc.3 (git 2.52.0)
 ...
 ```
 
