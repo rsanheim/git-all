@@ -48,7 +48,6 @@ impl Semaphore {
 const MIN_REPO_NAME_WIDTH: usize = 4;
 const MAX_REPO_NAME_WIDTH_CAP: usize = 48;
 const DEFAULT_TERMINAL_COLUMNS: usize = 80;
-const DEFAULT_TERMINAL_ROWS: usize = 24;
 
 /// Trace sample for a completed repo (`None` when `GIT_ALL_TRACE` is off).
 type RepoCompletion = Option<RepoTraceSample>;
@@ -263,21 +262,16 @@ where
         .collect();
     let stdout = std::io::stdout();
     let is_tty = stdout.is_tty();
-    let (terminal_columns, terminal_rows) = if is_tty {
+    let terminal_columns = if is_tty {
         terminal_size()
-            .map(|(columns, rows)| (columns as usize, rows as usize))
-            .unwrap_or((DEFAULT_TERMINAL_COLUMNS, DEFAULT_TERMINAL_ROWS))
+            .map(|(columns, _rows)| columns as usize)
+            .unwrap_or(DEFAULT_TERMINAL_COLUMNS)
     } else {
-        (0, 0)
+        0
     };
     let stdout = stdout.lock();
     let mut printer: Box<dyn Printer + '_> = if is_tty {
-        Box::new(TtyTablePrinter::new(
-            stdout,
-            terminal_rows,
-            terminal_columns,
-            name_width,
-        ))
+        Box::new(TtyTablePrinter::new(stdout, terminal_columns, name_width))
     } else {
         Box::new(PlainPrinter::new(stdout, name_width))
     };

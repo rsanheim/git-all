@@ -75,51 +75,7 @@ impl RepoRow {
     }
 }
 
-pub struct Viewport {
-    pub start: usize,
-    pub end: usize,
-}
-
-impl Viewport {
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn for_rows(rows: &[RepoRow], height: usize) -> Self {
-        let height = height.max(1);
-        let anchor = rows
-            .iter()
-            .position(|row| row.state != RowState::Finished)
-            .unwrap_or(rows.len().saturating_sub(height));
-        let start = anchor.min(rows.len().saturating_sub(height));
-        let end = (start + height).min(rows.len());
-        Self { start, end }
-    }
-
-    pub fn with_page_steps(
-        rows: &[RepoRow],
-        height: usize,
-        _previous_start: usize,
-        desired_overlap: usize,
-    ) -> Self {
-        let height = height.max(1);
-        let max_start = rows.len().saturating_sub(height);
-        let Some(anchor) = rows.iter().position(|row| row.state != RowState::Finished) else {
-            let end = (max_start + height).min(rows.len());
-            return Self {
-                start: max_start,
-                end,
-            };
-        };
-        let overlap = desired_overlap.min(height.saturating_sub(1));
-        let step = height.saturating_sub(overlap).max(1);
-        let start = ((anchor / step) * step).min(max_start);
-
-        let end = (start + height).min(rows.len());
-        Self { start, end }
-    }
-}
-
 pub struct FooterState {
-    pub visible_start: usize,
-    pub visible_end: usize,
     pub total_rows: usize,
     pub complete: usize,
     pub running: usize,
@@ -130,11 +86,9 @@ pub struct FooterState {
 impl FooterState {
     pub fn render_message(&self) -> String {
         format!(
-            "({}-{} of {}) | {} complete | {} running | {} pending | {:.1}s elapsed",
-            self.visible_start,
-            self.visible_end,
-            self.total_rows,
+            "{} of {} done | {} running | {} pending | {:.1}s",
             self.complete,
+            self.total_rows,
             self.running,
             self.pending,
             self.elapsed_ms as f64 / 1000.0,
@@ -211,34 +165,23 @@ impl<W: Write> Printer for PlainPrinter<W> {
 
 pub struct TtyTablePrinter<W: Write> {
     writer: W,
-    terminal_rows: usize,
     terminal_columns: usize,
     repo_width: usize,
-    viewport_start: usize,
-    rendered_line_count: usize,
+    next_to_print: usize,
+    footer_active: bool,
 }
 
 impl<W: Write> TtyTablePrinter<W> {
-    const VIEWPORT_OVERLAP: usize = 2;
+    const FOOTER_HEIGHT: u16 = 2;
 
-    pub fn new(
-        writer: W,
-        terminal_rows: usize,
-        terminal_columns: usize,
-        repo_width: usize,
-    ) -> Self {
+    pub fn new(writer: W, terminal_columns: usize, repo_width: usize) -> Self {
         Self {
             writer,
-            terminal_rows,
             terminal_columns,
             repo_width,
-            viewport_start: 0,
-            rendered_line_count: 0,
+            next_to_print: 0,
+            footer_active: false,
         }
-    }
-
-    fn visible_height(&self) -> usize {
-        self.terminal_rows.saturating_sub(3).max(1)
     }
 
     fn terminal_width(&self) -> usize {
@@ -250,109 +193,99 @@ impl<W: Write> TtyTablePrinter<W> {
         if line.len() <= width {
             return line.to_string();
         }
-
         let end = line.floor_char_boundary(width);
         line[..end].to_string()
     }
 
-    fn render_row(&self, row: &RepoRow) -> String {
+    fn render_finished_row(&self, row: &RepoRow) -> String {
         format!(
-            "{:<width$}  {}",
-            display_repo_name(&row.repo, self.repo_width),
-            row.output,
-            width = self.repo_width
+            "{} {}",
+            format_repo_name(&row.repo, self.repo_width),
+            row.output
         )
     }
 
-    fn render_summary_row(&self, footer: &FooterState) -> String {
-        format!(
-            "{:<width$}  {}",
-            "SUMMARY",
-            footer.render_message(),
-            width = self.repo_width
-        )
+    fn flush_finished_rows(&mut self, rows: &[RepoRow]) -> io::Result<Vec<usize>> {
+        let mut printed = Vec::new();
+        while self.next_to_print < rows.len()
+            && rows[self.next_to_print].state == RowState::Finished
+        {
+            let row = &rows[self.next_to_print];
+            writeln!(self.writer, "{}", self.render_finished_row(row))?;
+            printed.push(self.next_to_print);
+            self.next_to_print += 1;
+        }
+        Ok(printed)
     }
 
-    fn render_frame(&mut self, rows: &[RepoRow], elapsed_ms: u128) -> io::Result<()> {
-        if self.rendered_line_count > 0 {
+    fn clear_footer(&mut self) -> io::Result<()> {
+        if self.footer_active {
             queue!(
                 self.writer,
                 MoveToColumn(0),
-                MoveUp(self.rendered_line_count as u16)
+                MoveUp(Self::FOOTER_HEIGHT),
+                Clear(ClearType::FromCursorDown)
             )?;
+            self.footer_active = false;
         }
+        Ok(())
+    }
 
-        let viewport = Viewport::with_page_steps(
-            rows,
-            self.visible_height(),
-            self.viewport_start,
-            Self::VIEWPORT_OVERLAP,
-        );
-        self.viewport_start = viewport.start;
-        for row in &rows[viewport.start..viewport.end] {
-            queue!(self.writer, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
-            writeln!(self.writer, "{}", self.fit_line(&self.render_row(row)))?;
-        }
-
+    fn render_footer(&mut self, rows: &[RepoRow], elapsed_ms: u128) -> io::Result<()> {
         let mut complete = 0usize;
         let mut running = 0usize;
         let mut pending = 0usize;
         for row in rows {
             match row.state {
-                RowState::Finished => {
-                    complete += 1;
-                }
+                RowState::Finished => complete += 1,
                 RowState::Running => running += 1,
                 RowState::Pending => pending += 1,
             }
         }
         let footer = FooterState {
-            visible_start: if rows.is_empty() {
-                0
-            } else {
-                viewport.start + 1
-            },
-            visible_end: viewport.end,
             total_rows: rows.len(),
             complete,
             running,
             pending,
             elapsed_ms,
         };
-        let summary_row = self.render_summary_row(&footer);
         let separator = "-".repeat(self.terminal_width());
-        queue!(self.writer, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
+        let summary = format!(
+            "{:<width$}  {}",
+            "SUMMARY",
+            footer.render_message(),
+            width = self.repo_width
+        );
         writeln!(self.writer, "{}", separator)?;
-        queue!(self.writer, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
-        writeln!(self.writer, "{}", self.fit_line(&summary_row))?;
+        writeln!(self.writer, "{}", self.fit_line(&summary))?;
         self.writer.flush()?;
-
-        self.rendered_line_count = viewport.end.saturating_sub(viewport.start) + 2;
+        self.footer_active = true;
         Ok(())
     }
 }
 
 impl<W: Write> Printer for TtyTablePrinter<W> {
     fn start(&mut self, rows: &[RepoRow]) -> io::Result<()> {
-        self.render_frame(rows, 0)
+        self.render_footer(rows, 0)
     }
 
     fn update_row(
         &mut self,
         rows: &[RepoRow],
-        row_index: usize,
+        _row_index: usize,
         elapsed_ms: u128,
     ) -> io::Result<Vec<usize>> {
-        self.render_frame(rows, elapsed_ms)?;
-        Ok(match rows[row_index].state {
-            RowState::Finished => vec![row_index],
-            RowState::Pending | RowState::Running => Vec::new(),
-        })
+        self.clear_footer()?;
+        let printed = self.flush_finished_rows(rows)?;
+        self.render_footer(rows, elapsed_ms)?;
+        Ok(printed)
     }
 
     fn complete(&mut self, rows: &[RepoRow], elapsed_ms: u128) -> io::Result<Vec<usize>> {
-        self.render_frame(rows, elapsed_ms)?;
-        Ok(Vec::new())
+        self.clear_footer()?;
+        let printed = self.flush_finished_rows(rows)?;
+        self.render_footer(rows, elapsed_ms)?;
+        Ok(printed)
     }
 }
 
@@ -497,77 +430,8 @@ mod tests {
     }
 
     #[test]
-    fn viewport_follows_first_unfinished_repo() {
-        let rows = vec![
-            RepoRow::finished("activities".to_string(), "clean".to_string()),
-            RepoRow::pending("agentic-dev".to_string()),
-            RepoRow::running("amion-api".to_string()),
-            RepoRow::running("api-gateway".to_string()),
-            RepoRow::running("billing".to_string()),
-        ];
-
-        let viewport = Viewport::for_rows(&rows, 3);
-
-        assert_eq!(viewport.start, 1);
-        assert_eq!(viewport.end, 4);
-    }
-
-    #[test]
-    fn viewport_page_step_keeps_first_page_until_anchor_reaches_next_page() {
-        let rows = vec![
-            RepoRow::finished("activities".to_string(), "clean".to_string()),
-            RepoRow::pending("agentic-dev".to_string()),
-            RepoRow::pending("amion-api".to_string()),
-            RepoRow::pending("api-gateway".to_string()),
-            RepoRow::pending("billing".to_string()),
-        ];
-
-        let viewport = Viewport::with_page_steps(&rows, 3, 0, 1);
-
-        assert_eq!(viewport.start, 0);
-        assert_eq!(viewport.end, 3);
-    }
-
-    #[test]
-    fn viewport_page_step_advances_by_page_minus_overlap() {
-        let rows = vec![
-            RepoRow::finished("activities".to_string(), "clean".to_string()),
-            RepoRow::finished("agentic-dev".to_string(), "clean".to_string()),
-            RepoRow::finished("amion-api".to_string(), "clean".to_string()),
-            RepoRow::finished("api-gateway".to_string(), "clean".to_string()),
-            RepoRow::pending("billing".to_string()),
-            RepoRow::pending("campaigns".to_string()),
-            RepoRow::pending("curative".to_string()),
-            RepoRow::pending("data-platform".to_string()),
-        ];
-
-        let viewport = Viewport::with_page_steps(&rows, 3, 0, 1);
-
-        assert_eq!(viewport.start, 4);
-        assert_eq!(viewport.end, 7);
-    }
-
-    #[test]
-    fn viewport_page_step_shows_final_page_when_all_rows_finish() {
-        let rows = vec![
-            RepoRow::finished("activities".to_string(), "clean".to_string()),
-            RepoRow::finished("agentic-dev".to_string(), "clean".to_string()),
-            RepoRow::finished("amion-api".to_string(), "clean".to_string()),
-            RepoRow::finished("api-gateway".to_string(), "clean".to_string()),
-            RepoRow::finished("billing".to_string(), "clean".to_string()),
-        ];
-
-        let viewport = Viewport::with_page_steps(&rows, 3, 0, 1);
-
-        assert_eq!(viewport.start, 2);
-        assert_eq!(viewport.end, 5);
-    }
-
-    #[test]
-    fn footer_includes_slice_counts_elapsed_and_pending() {
+    fn footer_message_includes_done_running_pending_and_elapsed() {
         let footer = FooterState {
-            visible_start: 24,
-            visible_end: 47,
             total_rows: 98,
             complete: 41,
             running: 8,
@@ -577,99 +441,8 @@ mod tests {
 
         assert_eq!(
             footer.render_message(),
-            "(24-47 of 98) | 41 complete | 8 running | 49 pending | 2.1s elapsed"
+            "41 of 98 done | 8 running | 49 pending | 2.1s"
         );
-    }
-
-    #[test]
-    fn tty_table_printer_renders_pending_rows_without_headers() {
-        let rows = vec![
-            RepoRow::pending("activities".to_string()),
-            RepoRow::pending("agentic-dev".to_string()),
-        ];
-        let mut output = Vec::new();
-
-        {
-            let mut printer = TtyTablePrinter::new(&mut output, 6, 80, 14);
-            printer.start(&rows).expect("tty start");
-        }
-
-        let rendered = String::from_utf8(output).expect("utf8");
-        assert!(rendered.contains("activities"));
-        assert!(rendered.contains("pending"));
-        assert!(!rendered.contains("REPO"));
-        assert!(!rendered.contains("OUTPUT"));
-    }
-
-    #[test]
-    fn tty_table_printer_leaves_a_row_for_the_shell_prompt() {
-        let rows = vec![
-            RepoRow::pending("activities".to_string()),
-            RepoRow::pending("agentic-dev".to_string()),
-            RepoRow::pending("amion-api".to_string()),
-            RepoRow::pending("api-gateway".to_string()),
-            RepoRow::pending("billing".to_string()),
-        ];
-        let mut output = Vec::new();
-
-        {
-            let mut printer = TtyTablePrinter::new(&mut output, 6, 80, 14);
-            printer.start(&rows).expect("tty start");
-        }
-
-        let rendered = String::from_utf8(output).expect("utf8");
-        assert_eq!(rendered.lines().count(), 5);
-    }
-
-    #[test]
-    fn tty_table_printer_keeps_printed_lines_within_terminal_width() {
-        let rows = vec![
-            RepoRow::finished("turbo_tests".to_string(), "clean".to_string()),
-            RepoRow::finished("vcr".to_string(), "clean".to_string()),
-            RepoRow::finished("watcher".to_string(), "clean".to_string()),
-            RepoRow::finished("watttt".to_string(), "25 untracked".to_string()),
-            RepoRow::finished(
-                "whatthegem".to_string(),
-                "25 modified, 2 untracked".to_string(),
-            ),
-            RepoRow::finished("yolobox".to_string(), "clean".to_string()),
-            RepoRow::finished("zeitwerk".to_string(), "clean".to_string()),
-        ];
-        let mut output = Vec::new();
-
-        {
-            let mut printer = TtyTablePrinter::new(&mut output, 12, 80, 30);
-            printer.complete(&rows, 6900).expect("tty complete");
-        }
-
-        let rendered = String::from_utf8(output).expect("utf8");
-        let stripped = strip_ansi_sequences(&rendered);
-        for line in stripped.lines() {
-            assert!(line.len() <= 80, "{line:?} was wider than terminal");
-        }
-    }
-
-    #[test]
-    fn tty_table_printer_updates_finished_rows_without_waiting_for_earlier_rows() {
-        let rows = vec![
-            RepoRow::pending("activities".to_string()),
-            RepoRow::finished("agentic-dev".to_string(), "clean".to_string()),
-        ];
-        let mut output = Vec::new();
-
-        {
-            let mut printer = TtyTablePrinter::new(&mut output, 6, 80, 14);
-            printer.start(&rows).expect("tty start");
-            printer
-                .update_row(&rows, 1, 200)
-                .expect("tty out of order finish");
-        }
-
-        let rendered = String::from_utf8(output).expect("utf8");
-        assert!(rendered.contains("activities"));
-        assert!(rendered.contains("pending"));
-        assert!(rendered.contains("agentic-dev"));
-        assert!(rendered.contains("clean"));
     }
 
     #[test]
@@ -681,15 +454,16 @@ mod tests {
         let mut output = Vec::new();
 
         {
-            let mut printer = TtyTablePrinter::new(&mut output, 6, 80, 14);
+            let mut printer = TtyTablePrinter::new(&mut output, 80, 14);
             printer.start(&rows).expect("tty start");
             printer.complete(&rows, 1200).expect("tty complete");
         }
 
-        let rendered = String::from_utf8(output).expect("utf8");
-        assert!(rendered.contains("SUMMARY"));
-        assert!(rendered.contains("elapsed"));
-        assert!(rendered.contains("----"));
+        let stripped = strip_ansi_sequences(&String::from_utf8(output).expect("utf8"));
+        assert!(stripped.contains("SUMMARY"));
+        assert!(stripped.contains("1 of 1 done"));
+        assert!(stripped.contains("1.2s"));
+        assert!(stripped.contains("----"));
     }
 
     #[test]
@@ -701,20 +475,47 @@ mod tests {
         let mut output = Vec::new();
 
         {
-            let mut printer = TtyTablePrinter::new(&mut output, 6, 1, 14);
+            let mut printer = TtyTablePrinter::new(&mut output, 1, 14);
             printer.complete(&rows, 1200).expect("tty complete");
         }
 
-        let rendered = String::from_utf8(output).expect("utf8");
-        let stripped = strip_ansi_sequences(&rendered);
-        assert!(stripped.lines().any(|line| line == "-"));
-        for line in stripped.lines() {
-            assert!(line.len() <= 1, "{line:?} was wider than terminal");
+        let stripped = strip_ansi_sequences(&String::from_utf8(output).expect("utf8"));
+        let separator_lines: Vec<&str> = stripped
+            .lines()
+            .filter(|line| !line.is_empty() && line.chars().all(|c| c == '-'))
+            .collect();
+        assert!(!separator_lines.is_empty(), "expected a separator line");
+        for line in &separator_lines {
+            assert_eq!(line.len(), 1, "separator should match terminal width");
         }
     }
 
     #[test]
-    fn tty_table_printer_keeps_completed_rows_in_place() {
+    fn tty_table_printer_start_writes_only_the_footer() {
+        let rows = vec![
+            RepoRow::pending("activities".to_string()),
+            RepoRow::pending("agentic-dev".to_string()),
+        ];
+        let mut output = Vec::new();
+
+        {
+            let mut printer = TtyTablePrinter::new(&mut output, 80, 14);
+            printer.start(&rows).expect("tty start");
+        }
+
+        let rendered = String::from_utf8(output).expect("utf8");
+        let stripped = strip_ansi_sequences(&rendered);
+        assert!(
+            !stripped.contains("activities"),
+            "no rows should be printed yet, got: {stripped:?}"
+        );
+        assert!(stripped.contains("SUMMARY"));
+        assert!(stripped.contains("0 of 2 done"));
+        assert!(stripped.contains("2 pending"));
+    }
+
+    #[test]
+    fn tty_table_printer_writes_finished_rows_as_plain_lines_in_repo_order() {
         let mut rows = vec![
             RepoRow::running("activities".to_string()),
             RepoRow::running("agentic-dev".to_string()),
@@ -722,15 +523,139 @@ mod tests {
         let mut output = Vec::new();
 
         {
-            let mut printer = TtyTablePrinter::new(&mut output, 6, 80, 14);
+            let mut printer = TtyTablePrinter::new(&mut output, 80, 14);
             printer.start(&rows).expect("tty start");
             rows[0].mark_finished("clean".to_string());
-            printer.update_row(&rows, 0, 0).expect("tty finish");
+            printer.update_row(&rows, 0, 100).expect("tty update 0");
+            rows[1].mark_finished("1 modified".to_string());
+            printer.update_row(&rows, 1, 200).expect("tty update 1");
+        }
+
+        let stripped = strip_ansi_sequences(&String::from_utf8(output).expect("utf8"));
+        let activities_pos = stripped.find("activities").expect("activities printed");
+        let agentic_pos = stripped.find("agentic-dev").expect("agentic-dev printed");
+        assert!(activities_pos < agentic_pos);
+        assert!(stripped.contains("clean"));
+        assert!(stripped.contains("1 modified"));
+    }
+
+    #[test]
+    fn tty_table_printer_buffers_out_of_order_finished_rows_until_contiguous() {
+        let mut rows = vec![
+            RepoRow::running("activities".to_string()),
+            RepoRow::running("agentic-dev".to_string()),
+        ];
+        let output = SharedBuffer::default();
+
+        {
+            let mut printer = TtyTablePrinter::new(output.clone(), 80, 14);
+            printer.start(&rows).expect("tty start");
+
+            rows[1].mark_finished("clean".to_string());
+            let printed = printer.update_row(&rows, 1, 100).expect("tty late finish");
+            assert!(
+                printed.is_empty(),
+                "row 1 must buffer until row 0 finishes"
+            );
+            let mid = strip_ansi_sequences(&output.rendered());
+            assert!(
+                !mid.contains("agentic-dev  clean"),
+                "agentic-dev row not yet flushed, got: {mid:?}"
+            );
+
+            rows[0].mark_finished("clean".to_string());
+            let printed = printer
+                .update_row(&rows, 0, 200)
+                .expect("tty contiguous finish");
+            assert_eq!(printed, vec![0, 1]);
+        }
+
+        let stripped = strip_ansi_sequences(&output.rendered());
+        let activities_pos = stripped.find("activities").expect("activities printed");
+        let agentic_pos = stripped.find("agentic-dev").expect("agentic-dev printed");
+        assert!(activities_pos < agentic_pos);
+    }
+
+    #[test]
+    fn tty_table_printer_redraws_footer_in_place_via_moveup_and_clear() {
+        let mut rows = vec![RepoRow::running("activities".to_string())];
+        let mut output = Vec::new();
+
+        {
+            let mut printer = TtyTablePrinter::new(&mut output, 80, 14);
+            printer.start(&rows).expect("tty start");
+            rows[0].mark_finished("clean".to_string());
+            printer.update_row(&rows, 0, 100).expect("tty update");
         }
 
         let rendered = String::from_utf8(output).expect("utf8");
-        assert!(rendered.contains("activities"));
-        assert!(rendered.contains("clean"));
-        assert!(rendered.contains("agentic-dev"));
+        assert!(
+            rendered.contains("\x1b[2A"),
+            "expected MoveUp(2) escape; got: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("\x1b[J") || rendered.contains("\x1b[0J"),
+            "expected Clear(FromCursorDown) escape; got: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn tty_table_printer_does_not_truncate_finished_row_content() {
+        let long_status = "2410 modified, 473 deleted, 47 untracked";
+        let mut rows = vec![RepoRow::running("iOS-Doximity".to_string())];
+        let mut output = Vec::new();
+
+        {
+            let mut printer = TtyTablePrinter::new(&mut output, 40, 14);
+            printer.start(&rows).expect("tty start");
+            rows[0].mark_finished(long_status.to_string());
+            printer.update_row(&rows, 0, 100).expect("tty update");
+        }
+
+        let stripped = strip_ansi_sequences(&String::from_utf8(output).expect("utf8"));
+        assert!(
+            stripped.contains(long_status),
+            "long status should pass through unchanged; got: {stripped:?}"
+        );
+    }
+
+    #[test]
+    fn tty_table_printer_truncates_footer_to_terminal_width() {
+        let rows = vec![RepoRow::pending("activities".to_string())];
+        let mut output = Vec::new();
+
+        {
+            let mut printer = TtyTablePrinter::new(&mut output, 30, 14);
+            printer.start(&rows).expect("tty start");
+        }
+
+        let stripped = strip_ansi_sequences(&String::from_utf8(output).expect("utf8"));
+        for line in stripped.lines() {
+            assert!(line.len() <= 30, "{line:?} wider than terminal");
+        }
+    }
+
+    #[test]
+    fn tty_table_printer_complete_flushes_remaining_rows_and_renders_final_footer() {
+        let mut rows = vec![
+            RepoRow::running("activities".to_string()),
+            RepoRow::running("agentic-dev".to_string()),
+        ];
+        let mut output = Vec::new();
+
+        {
+            let mut printer = TtyTablePrinter::new(&mut output, 80, 14);
+            printer.start(&rows).expect("tty start");
+            rows[0].mark_finished("clean".to_string());
+            rows[1].mark_finished("clean".to_string());
+            let printed = printer.complete(&rows, 1500).expect("tty complete");
+            assert_eq!(printed, vec![0, 1]);
+        }
+
+        let stripped = strip_ansi_sequences(&String::from_utf8(output).expect("utf8"));
+        assert!(stripped.contains("activities"));
+        assert!(stripped.contains("agentic-dev"));
+        assert!(stripped.contains("2 of 2 done"));
+        assert!(stripped.contains("1.5s"));
     }
 }
