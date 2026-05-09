@@ -37,9 +37,9 @@ struct Cli {
     #[arg(long, conflicts_with = "ssh")]
     https: bool,
 
-    /// Number of parallel workers (default: 8, 0 = unlimited)
-    #[arg(short = 'n', long, default_value = "8")]
-    workers: usize,
+    /// Number of parallel workers (default: command-specific; status=8, fetch/pull=16; 0 = unlimited)
+    #[arg(short = 'n', long)]
+    workers: Option<usize>,
 
     /// How deep to scan for repositories (positive integer or "all")
     #[arg(long, default_value = "1", value_parser = parse_scan_depth, value_name = "DEPTH|all")]
@@ -91,6 +91,16 @@ fn command_label(command: &Option<Commands>) -> &str {
     }
 }
 
+/// Default worker count when -n is not specified.
+/// Network-bound commands benefit from higher concurrency; local-only commands
+/// see I/O contention with too many concurrent git processes.
+fn default_workers(command: &Option<Commands>) -> usize {
+    match command {
+        Some(Commands::Fetch { .. }) | Some(Commands::Pull { .. }) => 16,
+        _ => 8,
+    }
+}
+
 /// Exec git with all original args, replacing the git-all process.
 /// This is used when git-all is invoked from inside a git repository.
 #[cfg(unix)]
@@ -131,11 +141,12 @@ fn main() -> Result<()> {
     let cwd = std::env::current_dir()?;
     let scan_started_at = Instant::now();
     let repos = find_git_repos_in(&cwd, cli.scan_depth)?;
+    let workers = cli.workers.unwrap_or_else(|| default_workers(&cli.command));
     trace.emit_scan(
         command_label(&cli.command),
         &cwd,
         repos.len(),
-        cli.workers,
+        workers,
         scan_started_at.elapsed().as_millis(),
     )?;
     if repos.is_empty() {
@@ -151,7 +162,7 @@ fn main() -> Result<()> {
         None
     };
 
-    let mut ctx = ExecutionContext::new(cli.dry_run, url_scheme, cli.workers, cwd, trace);
+    let mut ctx = ExecutionContext::new(cli.dry_run, url_scheme, workers, cwd, trace);
 
     if cli.dry_run {
         println!(

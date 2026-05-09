@@ -1,7 +1,6 @@
 use anyhow::Result;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanDepth {
@@ -36,17 +35,26 @@ pub fn parse_scan_depth(value: &str) -> Result<ScanDepth, String> {
 }
 
 /// Check if the current working directory is inside a git repository.
-/// Uses `git rev-parse --git-dir` which correctly handles worktrees,
-/// bare repos, and the GIT_DIR environment variable.
+/// Walks up from the cwd looking for `.git` (directory or gitlink file).
+/// Honors `GIT_DIR` if set. Avoids spawning `git` so the common "not in a
+/// repo" path stays cheap.
 pub fn is_inside_git_repo() -> bool {
-    Command::new("git")
-        .args(["rev-parse", "--git-dir"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    if std::env::var_os("GIT_DIR").is_some() {
+        return true;
+    }
+    let Ok(start) = std::env::current_dir() else {
+        return false;
+    };
+    let mut cur: &Path = start.as_path();
+    loop {
+        if cur.join(".git").exists() {
+            return true;
+        }
+        match cur.parent() {
+            Some(parent) => cur = parent,
+            None => return false,
+        }
+    }
 }
 
 /// Find all git repositories under the given root, honoring scan depth.

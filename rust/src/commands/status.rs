@@ -85,8 +85,13 @@ pub fn run(ctx: &mut ExecutionContext, repos: &[PathBuf], extra_args: &[String])
         ctx,
         repos,
         |repo| {
-            // Always use --porcelain for machine-readable output
-            let mut args = vec!["status".to_string(), "--porcelain".to_string()];
+            // --no-optional-locks: status is read-only; skip the index-refresh lock.
+            // --porcelain: machine-readable output.
+            let mut args = vec![
+                "--no-optional-locks".to_string(),
+                "status".to_string(),
+                "--porcelain".to_string(),
+            ];
             args.extend(extra_args.iter().cloned());
             GitCommand::new(repo.clone(), args)
         },
