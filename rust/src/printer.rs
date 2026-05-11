@@ -311,10 +311,48 @@ impl<W: Write> TtyTablePrinter<W> {
         queue!(self.writer, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
         writeln!(self.writer, "{}", separator)?;
         queue!(self.writer, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
-        writeln!(self.writer, "{}", summary_row)?;
+        write!(self.writer, "{}", summary_row)?;
         self.writer.flush()?;
 
-        self.rendered_line_count = viewport.end.saturating_sub(viewport.start) + 2;
+        self.rendered_line_count = viewport.end.saturating_sub(viewport.start) + 1;
+        Ok(())
+    }
+
+    fn render_complete(&mut self, rows: &[RepoRow], elapsed_ms: u128) -> io::Result<()> {
+        if self.rendered_line_count > 0 {
+            queue!(
+                self.writer,
+                MoveToColumn(0),
+                MoveUp(self.rendered_line_count as u16)
+            )?;
+        }
+
+        for row in rows {
+            queue!(self.writer, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
+            writeln!(self.writer, "{}", self.render_row(row))?;
+        }
+
+        let complete = rows
+            .iter()
+            .filter(|row| row.state == RowState::Finished)
+            .count();
+        let footer = FooterState {
+            visible_start: if rows.is_empty() { 0 } else { 1 },
+            visible_end: rows.len(),
+            total_rows: rows.len(),
+            complete,
+            running: 0,
+            pending: 0,
+            elapsed_ms,
+        };
+        let summary_row = self.render_summary_row(&footer);
+        let separator = "-".repeat(self.terminal_columns.max(summary_row.len()).max(4));
+        queue!(self.writer, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
+        writeln!(self.writer, "{}", separator)?;
+        queue!(self.writer, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
+        writeln!(self.writer, "{}", summary_row)?;
+        self.writer.flush()?;
+        self.rendered_line_count = 0;
         Ok(())
     }
 }
@@ -338,7 +376,7 @@ impl<W: Write> Printer for TtyTablePrinter<W> {
     }
 
     fn complete(&mut self, rows: &[RepoRow], elapsed_ms: u128) -> io::Result<Vec<usize>> {
-        self.render_frame(rows, elapsed_ms)?;
+        self.render_complete(rows, elapsed_ms)?;
         Ok(Vec::new())
     }
 }
