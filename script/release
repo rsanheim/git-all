@@ -69,16 +69,23 @@ main() {
 
     echo "=== Releasing v${VERSION} ==="
 
-    # Update Cargo.toml version
+    local CURRENT_BRANCH
+    CURRENT_BRANCH=$(git symbolic-ref --quiet --short HEAD) || {
+        echo "Error: releases must be cut from a branch, not detached HEAD"
+        exit 1
+    }
+
+    # Update Rust package version and lockfile
     run sed -i'' -e "s/^version = \".*\"/version = \"${VERSION}\"/" "${GIT_ALL_ROOT}/rust/Cargo.toml"
+    run cargo update --manifest-path "${GIT_ALL_ROOT}/rust/Cargo.toml" --package git-all
 
     # Commit version bump
-    run git add "${GIT_ALL_ROOT}/rust/Cargo.toml"
+    run git add "${GIT_ALL_ROOT}/rust/Cargo.toml" "${GIT_ALL_ROOT}/rust/Cargo.lock"
     run git commit -m "Bump version to ${VERSION}"
 
     # Create and push tag
     run git tag "v${VERSION}"
-    run git push origin main "v${VERSION}"
+    run git push origin "${CURRENT_BRANCH}" "v${VERSION}"
 
     echo ""
     if $DRY_RUN; then

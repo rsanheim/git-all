@@ -19,6 +19,8 @@ rsanheim/git-all                rsanheim/homebrew-tap
 ```
 git-all-{version}-darwin-arm64.tar.gz
 git-all-{version}-darwin-x86_64.tar.gz
+git-all-{version}-linux-arm64.tar.gz
+git-all-{version}-linux-x86_64.tar.gz
 ```
 
 ## Release Steps
@@ -72,8 +74,12 @@ Before releasing, test the formula locally:
 
 ```bash
 cd ~/src/rsanheim/homebrew-tap
-brew audit --strict Formula/git-all.rb
 brew style Formula/git-all.rb
+brew readall rsanheim/tap
+brew test rsanheim/tap/git-all
+
+# Optional extra lint pass. Homebrew 6 rejects path-based audit.
+brew audit --strict rsanheim/tap/git-all
 ```
 
 ## Changing Implementation Language

@@ -21,6 +21,12 @@ jobs:
           - target: x86_64-apple-darwin
             os: macos-15-intel
             artifact_name: git-all-darwin-x86_64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            artifact_name: git-all-linux-arm64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+            artifact_name: git-all-linux-x86_64
 
     steps:
       - uses: actions/checkout@v4
@@ -31,12 +37,12 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --release --manifest-path rust/Cargo.toml
+        run: cargo build --release --manifest-path rust/Cargo.toml --target ${{ matrix.target }}
 
       - name: Create tarball
         run: |
-          cd rust/target/release
-          tar -czvf ../../../${{ matrix.artifact_name }}.tar.gz git-all
+          cd rust/target/${{ matrix.target }}/release
+          tar -czvf ../../../../${{ matrix.artifact_name }}.tar.gz git-all
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -59,6 +65,8 @@ jobs:
         run: |
           mv git-all-darwin-arm64/git-all-darwin-arm64.tar.gz git-all-${{ steps.version.outputs.version }}-darwin-arm64.tar.gz
           mv git-all-darwin-x86_64/git-all-darwin-x86_64.tar.gz git-all-${{ steps.version.outputs.version }}-darwin-x86_64.tar.gz
+          mv git-all-linux-arm64/git-all-linux-arm64.tar.gz git-all-${{ steps.version.outputs.version }}-linux-arm64.tar.gz
+          mv git-all-linux-x86_64/git-all-linux-x86_64.tar.gz git-all-${{ steps.version.outputs.version }}-linux-x86_64.tar.gz
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -66,4 +74,6 @@ jobs:
           files: |
             git-all-${{ steps.version.outputs.version }}-darwin-arm64.tar.gz
             git-all-${{ steps.version.outputs.version }}-darwin-x86_64.tar.gz
+            git-all-${{ steps.version.outputs.version }}-linux-arm64.tar.gz
+            git-all-${{ steps.version.outputs.version }}-linux-x86_64.tar.gz
           generate_release_notes: true

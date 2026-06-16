@@ -68,24 +68,39 @@ main() {
     echo "=== Updating Homebrew formula for v${VERSION} ==="
 
     # Download and compute SHA256
-    local ARM64_URL="https://github.com/rsanheim/git-all/releases/download/v${VERSION}/git-all-${VERSION}-darwin-arm64.tar.gz"
-    local X86_64_URL="https://github.com/rsanheim/git-all/releases/download/v${VERSION}/git-all-${VERSION}-darwin-x86_64.tar.gz"
+    local DARWIN_ARM64_URL="https://github.com/rsanheim/git-all/releases/download/v${VERSION}/git-all-${VERSION}-darwin-arm64.tar.gz"
+    local DARWIN_X86_64_URL="https://github.com/rsanheim/git-all/releases/download/v${VERSION}/git-all-${VERSION}-darwin-x86_64.tar.gz"
+    local LINUX_ARM64_URL="https://github.com/rsanheim/git-all/releases/download/v${VERSION}/git-all-${VERSION}-linux-arm64.tar.gz"
+    local LINUX_X86_64_URL="https://github.com/rsanheim/git-all/releases/download/v${VERSION}/git-all-${VERSION}-linux-x86_64.tar.gz"
 
     echo "Computing SHA256 hashes..."
     echo ""
 
-    echo "Downloading arm64 tarball..."
-    local ARM64_SHA
-    ARM64_SHA=$(curl -sL "$ARM64_URL" | shasum -a 256 | cut -d' ' -f1)
+    fetch_sha() {
+        local label="$1"
+        local url="$2"
+        echo "Downloading ${label} tarball..." >&2
+        curl -fsSL "$url" | shasum -a 256 | cut -d' ' -f1
+    }
 
-    echo "Downloading x86_64 tarball..."
-    local X86_64_SHA
-    X86_64_SHA=$(curl -sL "$X86_64_URL" | shasum -a 256 | cut -d' ' -f1)
+    local DARWIN_ARM64_SHA
+    DARWIN_ARM64_SHA=$(fetch_sha "darwin arm64" "$DARWIN_ARM64_URL")
+
+    local DARWIN_X86_64_SHA
+    DARWIN_X86_64_SHA=$(fetch_sha "darwin x86_64" "$DARWIN_X86_64_URL")
+
+    local LINUX_ARM64_SHA
+    LINUX_ARM64_SHA=$(fetch_sha "linux arm64" "$LINUX_ARM64_URL")
+
+    local LINUX_X86_64_SHA
+    LINUX_X86_64_SHA=$(fetch_sha "linux x86_64" "$LINUX_X86_64_URL")
 
     echo ""
     echo "SHA256 hashes:"
-    echo "  arm64:  ${ARM64_SHA}"
-    echo "  x86_64: ${X86_64_SHA}"
+    echo "  darwin arm64:   ${DARWIN_ARM64_SHA}"
+    echo "  darwin x86_64:  ${DARWIN_X86_64_SHA}"
+    echo "  linux arm64:    ${LINUX_ARM64_SHA}"
+    echo "  linux x86_64:   ${LINUX_X86_64_SHA}"
     echo ""
 
     local FORMULA="${TAP_PATH}/Formula/git-all.rb"
@@ -100,15 +115,24 @@ main() {
     run sed -i '' "s/version \".*\"/version \"${VERSION}\"/" "$FORMULA"
 
     # Update SHA256 hashes using awk (portable, unlike GNU sed's 0,/pattern/)
-    # First sha256 = arm64, second sha256 = x86_64
     if $DRY_RUN; then
         echo "[dry-run] awk (update sha256 hashes) $FORMULA"
     else
-        awk -v arm64="$ARM64_SHA" -v x86="$X86_64_SHA" '
+        awk \
+            -v darwin_arm64="$DARWIN_ARM64_SHA" \
+            -v darwin_x86="$DARWIN_X86_64_SHA" \
+            -v linux_arm64="$LINUX_ARM64_SHA" \
+            -v linux_x86="$LINUX_X86_64_SHA" '
+            /darwin-arm64/ { platform = "darwin_arm64" }
+            /darwin-x86_64/ { platform = "darwin_x86" }
+            /linux-arm64/ { platform = "linux_arm64" }
+            /linux-x86_64/ { platform = "linux_x86" }
             /sha256 "/ {
-                n++
-                if (n == 1) sub(/sha256 "[^"]*"/, "sha256 \"" arm64 "\"")
-                if (n == 2) sub(/sha256 "[^"]*"/, "sha256 \"" x86 "\"")
+                if (platform == "darwin_arm64") sub(/sha256 "[^"]*"/, "sha256 \"" darwin_arm64 "\"")
+                if (platform == "darwin_x86") sub(/sha256 "[^"]*"/, "sha256 \"" darwin_x86 "\"")
+                if (platform == "linux_arm64") sub(/sha256 "[^"]*"/, "sha256 \"" linux_arm64 "\"")
+                if (platform == "linux_x86") sub(/sha256 "[^"]*"/, "sha256 \"" linux_x86 "\"")
+                platform = ""
             }
             { print }
         ' "$FORMULA" > "${FORMULA}.tmp" && mv "${FORMULA}.tmp" "$FORMULA"
