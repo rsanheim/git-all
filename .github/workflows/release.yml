@@ -21,10 +21,10 @@ jobs:
           - target: x86_64-apple-darwin
             os: macos-15-intel
             artifact_name: git-all-darwin-x86_64
-          - target: aarch64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-musl
             os: ubuntu-24.04-arm
             artifact_name: git-all-linux-arm64
-          - target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-musl
             os: ubuntu-24.04
             artifact_name: git-all-linux-x86_64
 
