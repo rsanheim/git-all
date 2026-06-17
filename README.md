@@ -82,23 +82,15 @@ git-all v0.7.1-rc.3 (git 2.52.0)
 
 ## Performance Tips
 
-For network operations (`pull`, `fetch`), SSH connection overhead adds up if you use SSH git remotes. Enable SSH multiplexing to reuse connections...for example, with GitHub:
+For network operations (`pull`, `fetch`), `git-all` disables SSH `ControlMaster` multiplexing by default. When you fan out many git processes against a single host, multiplexing them over one connection serializes the work (OpenSSH's `MaxSessions` default is 10, and GitHub caps server-side too), so disabling it lets each subprocess open its own connection and scale with `--workers`. Network throughput is far better as a result.
 
-```
-# ~/.ssh/config
-Host github.com
-  ControlMaster auto
-  ControlPath ~/.ssh/sockets/%r@%h-%p
-  ControlPersist 9m
-```
-
-Note: GitHub terminates idle SSH connections after 10 minutes, so keep `ControlPersist` under that.
+If you have only a handful of repos and your workflow benefits from multiplexing, opt back in per run:
 
 ```bash
-mkdir -p ~/.ssh/sockets && chmod 700 ~/.ssh/sockets
+git-all --ssh-multiplexing pull
 ```
 
-This can reduce `git-all pull` time by ~3x across many repos.
+This makes `git-all` inherit your `~/.ssh/config` unchanged.
 
 ## Similar tools
 
