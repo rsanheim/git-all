@@ -3,6 +3,10 @@ use crossterm::queue;
 use crossterm::terminal::{Clear, ClearType};
 use std::io::{self, Write};
 
+/// Fallback width used when the terminal does not report its size (0 columns).
+/// A real width, however small, is always respected as-is.
+pub(crate) const DEFAULT_TERMINAL_COLUMNS: usize = 80;
+
 fn display_repo_name(name: &str, width: usize) -> String {
     if name.len() <= width {
         return name.to_string();
@@ -185,7 +189,11 @@ impl<W: Write> TtyTablePrinter<W> {
     }
 
     fn terminal_width(&self) -> usize {
-        self.terminal_columns.max(1)
+        if self.terminal_columns == 0 {
+            DEFAULT_TERMINAL_COLUMNS
+        } else {
+            self.terminal_columns
+        }
     }
 
     fn fit_line(&self, line: &str) -> String {
@@ -488,6 +496,38 @@ mod tests {
         for line in &separator_lines {
             assert_eq!(line.len(), 1, "separator should match terminal width");
         }
+    }
+
+    #[test]
+    fn tty_table_printer_falls_back_to_default_width_when_size_unknown() {
+        // terminal_columns == 0 means the terminal did not report its size
+        // (e.g. a pty with no winsize). The footer must render at the default
+        // width instead of collapsing to a single character.
+        let rows = vec![RepoRow::finished(
+            "activities".to_string(),
+            "clean".to_string(),
+        )];
+        let mut output = Vec::new();
+
+        {
+            let mut printer = TtyTablePrinter::new(&mut output, 0, 14);
+            printer.complete(&rows, 1200).expect("tty complete");
+        }
+
+        let stripped = strip_ansi_sequences(&String::from_utf8(output).expect("utf8"));
+        let separator_lines: Vec<&str> = stripped
+            .lines()
+            .filter(|line| !line.is_empty() && line.chars().all(|c| c == '-'))
+            .collect();
+        assert!(!separator_lines.is_empty(), "expected a separator line");
+        for line in &separator_lines {
+            assert_eq!(
+                line.len(),
+                DEFAULT_TERMINAL_COLUMNS,
+                "0-width terminal should fall back to the default width"
+            );
+        }
+        assert!(stripped.contains("SUMMARY"), "footer must not be truncated");
     }
 
     #[test]
