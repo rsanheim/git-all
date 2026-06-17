@@ -1,0 +1,13 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Dev-only automation (man page generation). Built solely via
+# `cargo xtask` / `cargo run -p xtask`; never part of normal builds or the
+# shipped git-all binary, so clap_mangen adds no runtime or build-time cost.
+[dependencies]
+git-all = { path = ".." }
+clap_mangen = "0.2"
+anyhow = "1.0"

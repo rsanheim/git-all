@@ -1,3 +1,10 @@
+[workspace]
+members = ["xtask"]
+# Only the git-all package builds/tests by default; xtask (dev-only man-page
+# generation) is built solely via `cargo run -p xtask` / `cargo xtask`, so its
+# deps (clap_mangen) never touch normal builds or the shipped binary.
+default-members = ["."]
+
 [package]
 name = "git-all"
 version = "0.7.3"
