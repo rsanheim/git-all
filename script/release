@@ -75,8 +75,11 @@ main() {
         exit 1
     }
 
-    # Update Rust package version and lockfile
-    run sed -i'' -e "s/^version = \".*\"/version = \"${VERSION}\"/" "${GIT_ALL_ROOT}/rust/Cargo.toml"
+    # Update Rust package version and lockfile.
+    # Use perl -i (not sed -i): BSD/macOS sed treats `-i'' -e` as a `-e` backup
+    # suffix and litters Cargo.toml-e; perl -i edits in place identically on
+    # macOS and Linux with no backup file.
+    run perl -i -pe "s/^version = \".*\"/version = \"${VERSION}\"/" "${GIT_ALL_ROOT}/rust/Cargo.toml"
     run cargo update --manifest-path "${GIT_ALL_ROOT}/rust/Cargo.toml" --package git-all
 
     # Commit version bump
