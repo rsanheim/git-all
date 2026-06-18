@@ -7,7 +7,7 @@ default-members = ["."]
 
 [package]
 name = "git-all"
-version = "0.7.3"
+version = "0.7.4"
 edition = "2024"
 description = "parallel git across many repositories"
 
