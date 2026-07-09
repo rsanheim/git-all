@@ -2,8 +2,28 @@
 
 ## Status
 
-Draft / investigation. No code change proposed yet — this doc frames the problem
-and lays out options for discussion.
+Phase 1 implemented (Options A + B). This doc frames the problem, records the
+options, and marks what shipped. Option C (completion-order flushing) and the
+Phase 2 full-live-table directions remain open for discussion.
+
+### What Phase 1 shipped
+
+A scope header and a live footer on the TTY path (`TtyTablePrinter` /
+`run_parallel`):
+
+* A one-time scope banner above the footer, e.g.
+  `git-all fetch · 98 repos · ~/work · 16 workers`, so the size of the job is
+  visible immediately.
+* The footer now redraws on a 200ms tick (via `recv_timeout`), so the elapsed
+  clock advances even when no repo has completed — it never looks frozen.
+* The footer lists the in-flight repos (up to six names, then `+N more`), so you
+  can see what's being worked on before anything finishes.
+
+Non-TTY / redirected output is unchanged: no header, no footer, no ANSI — plain
+completion rows only. Verified end-to-end under tmux for both `status` and
+`fetch` (clean in-place redraw, `MoveUp` only ever 2–3 lines, no scrollback
+pollution). Head-of-line blocking of the finished *rows* is unchanged and is what
+Option C would address next.
 
 ## Summary
 
@@ -175,11 +195,14 @@ and that it plays well with our per-repo line format.
 
 Two phases:
 
-* [ ] **Phase 1 (low risk, high value):** Option A + Option B, and strongly
-  consider Option C. Together these give an immediate scope line, a live-ticking
-  footer that shows what's in flight, and repo lines that populate as work
-  finishes — which addresses the actual complaint ("no feedback / looks hung")
-  without reopening the viewport complexity.
+* [x] **Phase 1 (low risk, high value):** Option A + Option B — an immediate
+  scope line plus a live-ticking footer that shows what's in flight. This
+  addresses the actual complaint ("no feedback / looks hung") without reopening
+  the viewport complexity. Shipped; see *What Phase 1 shipped* above.
+* [ ] **Option C (optional follow-up):** completion-order flushing so finished
+  repo *rows* appear the instant they complete rather than waiting behind the
+  alphabetically-earliest unfinished repo. Deferred pending the default-vs-opt-in
+  decision below.
 * [ ] **Phase 2 (if Phase 1 isn't enough):** evaluate Option D or E as the
   "full live table" north star, informed by whether Phase 1 already feels good on
   `~/work` / `~/src/oss`.

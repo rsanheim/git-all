@@ -188,6 +188,7 @@ pub fn run() -> Result<()> {
         cli.ssh_multiplexing,
         workers,
         cwd,
+        command_label(&cli.command).to_string(),
         trace,
     );
 
