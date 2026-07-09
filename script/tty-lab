@@ -18,14 +18,15 @@ tty-lab — fake latency workspace for eyeballing git-all's live TTY output.
 
 Usage:
   script/tty-lab                       # 24 repos, open an interactive shell
+  script/tty-lab 80                    # 80 repos (bare number = --repos)
   script/tty-lab --run status          # run one command and exit
-  script/tty-lab --repos 80 --run fetch
+  script/tty-lab 80 --run fetch
   script/tty-lab --min-ms 100 --max-ms 3000   # slower, more dramatic
   script/tty-lab --remotes --run fetch # wire local remotes so fetch is clean
   script/tty-lab --keep                # keep the workspace after exit
 
 Options:
-  --repos N     number of fake repos to create (default: 24)
+  --repos N     number of fake repos to create (default: 24; or a bare number)
   --dirty K     leave K repos with uncommitted changes (default: 4)
   --min-ms MS   minimum per-git-call delay in ms (default: 300)
   --max-ms MS   maximum per-git-call delay in ms (default: 1500)
@@ -60,9 +61,16 @@ while [[ $# -gt 0 ]]; do
     --run) run_cmd="$2"; shift 2 ;;
     --keep) keep=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    *) echo "tty-lab: unknown option: $1" >&2; usage >&2; exit 2 ;;
+    -*) echo "tty-lab: unknown option: $1" >&2; usage >&2; exit 2 ;;
+    '' | *[!0-9]*) echo "tty-lab: unexpected argument: $1" >&2; usage >&2; exit 2 ;;
+    *) repos="$1"; shift ;;   # a bare number is the repo count
   esac
 done
+
+if (( repos < 1 )); then
+  echo "tty-lab: --repos must be at least 1 (got $repos)" >&2
+  exit 2
+fi
 
 # Pick a git-all binary: explicit --bin, else release, else debug.
 if [[ -z "$bin" ]]; then
