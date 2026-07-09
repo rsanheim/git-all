@@ -25,6 +25,11 @@ completion rows only. Verified end-to-end under tmux for both `status` and
 pollution). Head-of-line blocking of the finished *rows* is unchanged and is what
 Option C would address next.
 
+Reproduce locally with `script/tty-lab`, which builds a throwaway workspace of
+fake repos behind a `git` latency shim so you can watch the live footer without
+the network — `script/tty-lab` for an interactive shell, or
+`script/tty-lab --run fetch` for a one-shot.
+
 ## Summary
 
 After consolidating the TTY UX onto the sticky-footer printer (shipped 0.7.3+),

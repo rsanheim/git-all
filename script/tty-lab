@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+#
+# tty-lab — spin up a throwaway workspace of fake repos behind a latency shim so
+# you can eyeball git-all's live TTY output without needing the network.
+#
+# It builds a temp dir of N git repos, puts a slow `git` shim on PATH (each git
+# call sleeps a randomized MIN..MAX ms, simulating network/IO), and either runs
+# one git-all command or drops you into an interactive subshell where `git-all`
+# points at your build and `git` is the shim.
+#
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+usage() {
+  cat <<'USAGE'
+tty-lab — fake latency workspace for eyeballing git-all's live TTY output.
+
+Usage:
+  script/tty-lab                       # 24 repos, open an interactive shell
+  script/tty-lab --run status          # run one command and exit
+  script/tty-lab --repos 80 --run fetch
+  script/tty-lab --min-ms 100 --max-ms 3000   # slower, more dramatic
+  script/tty-lab --remotes --run fetch # wire local remotes so fetch is clean
+  script/tty-lab --keep                # keep the workspace after exit
+
+Options:
+  --repos N     number of fake repos to create (default: 24)
+  --dirty K     leave K repos with uncommitted changes (default: 4)
+  --min-ms MS   minimum per-git-call delay in ms (default: 300)
+  --max-ms MS   maximum per-git-call delay in ms (default: 1500)
+  --remotes     give each repo a local bare remote (makes `fetch` meaningful)
+  --bin PATH    git-all binary to drive (default: release, else debug build)
+  --run "CMD"   run `git-all CMD` once, then exit instead of opening a shell
+  --keep        keep the temp workspace instead of deleting it on exit
+  -h, --help    show this help
+
+In interactive mode, `git` is the latency shim and `git-all` points at your
+build. Type `exit` to tear the workspace down.
+USAGE
+}
+
+repos=24
+dirty=4
+min_ms=300
+max_ms=1500
+remotes=0
+keep=0
+run_cmd=""
+bin=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repos) repos="$2"; shift 2 ;;
+    --dirty) dirty="$2"; shift 2 ;;
+    --min-ms) min_ms="$2"; shift 2 ;;
+    --max-ms) max_ms="$2"; shift 2 ;;
+    --remotes) remotes=1; shift ;;
+    --bin) bin="$2"; shift 2 ;;
+    --run) run_cmd="$2"; shift 2 ;;
+    --keep) keep=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "tty-lab: unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+# Pick a git-all binary: explicit --bin, else release, else debug.
+if [[ -z "$bin" ]]; then
+  if [[ -x "$ROOT/rust/target/release/git-all" ]]; then
+    bin="$ROOT/rust/target/release/git-all"
+  elif [[ -x "$ROOT/rust/target/debug/git-all" ]]; then
+    bin="$ROOT/rust/target/debug/git-all"
+  else
+    echo "tty-lab: no git-all binary found. Build one first:" >&2
+    echo "  script/build -t rust        # release" >&2
+    echo "  (cd rust && cargo build)    # debug" >&2
+    exit 1
+  fi
+fi
+[[ -x "$bin" ]] || { echo "tty-lab: not executable: $bin" >&2; exit 1; }
+
+real_git="$(command -v git)"
+
+lab="$(mktemp -d "${TMPDIR:-/tmp}/git-all-tty-lab.XXXXXX")"
+ws="$lab/ws"
+shim="$lab/shim"
+mkdir -p "$ws" "$shim"
+
+cleanup() { [[ "$keep" == 1 ]] || rm -r "$lab" 2>/dev/null || true; }
+trap cleanup EXIT
+
+# A spread of alphabetically-distributed names; synthesized past the list end.
+names=(activities agentic-dev amion-api backend-core billing-svc cache-layer
+       dashboard data-pipeline edge-proxy feature-flags gateway growth-tools
+       identity infra-tools kafka-bridge ledger metrics-agent notifications
+       orders-api payments quota-svc reporting search-index webhooks
+       xylophone-svc yak-shaver zebra-cache)
+
+chosen=()
+for ((i = 0; i < repos; i++)); do
+  if (( i < ${#names[@]} )); then
+    chosen+=("${names[i]}")
+  else
+    chosen+=("$(printf 'repo-%03d' "$i")")
+  fi
+done
+
+echo "tty-lab: creating $repos repos in $ws ..."
+for n in "${chosen[@]}"; do
+  r="$ws/$n"
+  git init -q "$r"
+  git -C "$r" config user.email lab@example.com
+  git -C "$r" config user.name tty-lab
+  echo "# $n" > "$r/README.md"
+  git -C "$r" add README.md
+  git -C "$r" commit -q -m init
+done
+
+# Leave the first `dirty` repos with uncommitted changes so status output varies.
+for ((i = 0; i < dirty && i < ${#chosen[@]}; i++)); do
+  : > "$ws/${chosen[i]}/uncommitted.tmp"
+done
+
+if [[ "$remotes" == 1 ]]; then
+  echo "tty-lab: wiring local bare remotes ..."
+  mkdir -p "$lab/remotes"
+  for n in "${chosen[@]}"; do
+    git init -q --bare "$lab/remotes/$n.git"
+    git -C "$ws/$n" remote add origin "$lab/remotes/$n.git"
+    git -C "$ws/$n" push -q origin HEAD:refs/heads/main
+  done
+fi
+
+# Latency shim: sleep a random MIN..MAX ms, then exec the real git.
+cat > "$shim/git" <<EOF
+#!/usr/bin/env bash
+d=\$(( (RANDOM % ($max_ms - $min_ms + 1)) + $min_ms ))
+sleep "\$(printf '%d.%03d' \$((d / 1000)) \$((d % 1000)))"
+exec "$real_git" "\$@"
+EOF
+chmod +x "$shim/git"
+
+# `git-all` launcher pointing at the chosen build.
+cat > "$shim/git-all" <<EOF
+#!/usr/bin/env bash
+exec "$bin" "\$@"
+EOF
+chmod +x "$shim/git-all"
+
+echo "tty-lab: git-all = $bin"
+echo "tty-lab: git shim delay = ${min_ms}-${max_ms}ms per call"
+
+if [[ -n "$run_cmd" ]]; then
+  # shellcheck disable=SC2086
+  ( cd "$ws" && PATH="$shim:$PATH" git-all $run_cmd )
+  exit $?
+fi
+
+# Interactive mode: re-prepend the shim after the user's rc so it wins, land in
+# the workspace, and hint at what to try.
+rc="$shim/rc"
+cat > "$rc" <<EOF
+[ -f ~/.bashrc ] && source ~/.bashrc
+export PATH="$shim:\$PATH"
+cd "$ws"
+PS1="(tty-lab) \w \\\$ "
+echo
+echo "tty-lab ready — $repos repos, git delay ${min_ms}-${max_ms}ms."
+echo "  git-all status            git-all -n 4 fetch"
+echo "  git-all fetch | head      (piped = non-TTY, plain output)"
+echo "type 'exit' to tear down the workspace."
+EOF
+exec bash --rcfile "$rc" -i
