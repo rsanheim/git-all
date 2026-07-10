@@ -6,8 +6,8 @@
 //! then restores the terminal cleanly on completion, quit, or panic.
 
 use std::io::{self, Write};
-use std::sync::Once;
 use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::{Arc, Once};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -29,7 +29,7 @@ use ratatui::widgets::{
 };
 
 use crate::printer::{RepoRow, RowState, format_repo_name};
-use crate::runner::{OutputFormatter, RepoEvent};
+use crate::runner::{CancelRegistry, OutputFormatter, RepoEvent};
 
 /// Redraw / input-poll cadence. Drives the spinner and elapsed clock.
 const TICK: Duration = Duration::from_millis(100);
@@ -193,6 +193,7 @@ pub(crate) fn run(
     name_width: usize,
     started_at: Instant,
     formatter: &dyn OutputFormatter,
+    cancel: Arc<CancelRegistry>,
 ) -> Result<()> {
     install_panic_hook();
     let _guard = TerminalGuard::enter()?;
@@ -200,6 +201,7 @@ pub(crate) fn run(
 
     let mut follow = true;
     let mut selected = 0usize;
+    let mut user_quit = false;
     let last = rows.len().saturating_sub(1);
 
     loop {
@@ -242,8 +244,14 @@ pub(crate) fn run(
             continue;
         }
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => break,
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+            KeyCode::Char('q') | KeyCode::Esc => {
+                user_quit = true;
+                break;
+            }
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                user_quit = true;
+                break;
+            }
             KeyCode::Char('j') | KeyCode::Down => {
                 follow = false;
                 selected = (selected + 1).min(last);
@@ -259,6 +267,13 @@ pub(crate) fn run(
             KeyCode::Char('G') | KeyCode::End => follow = true,
             _ => {}
         }
+    }
+
+    // On an explicit quit, tear down the in-flight git children so the caller's
+    // thread join returns promptly instead of waiting out every network op. A
+    // natural finish leaves nothing running to signal.
+    if user_quit {
+        cancel.cancel();
     }
 
     Ok(())

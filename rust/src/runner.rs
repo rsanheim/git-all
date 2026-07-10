@@ -1,11 +1,13 @@
 use anyhow::Result;
 use crossterm::terminal::size as terminal_size;
 use crossterm::tty::IsTty;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::printer::{PlainPrinter, Printer, RepoRow, TtyTablePrinter};
 use crate::repo::repo_display_name;
@@ -47,6 +49,96 @@ impl Semaphore {
 
 const MIN_REPO_NAME_WIDTH: usize = 4;
 const MAX_REPO_NAME_WIDTH_CAP: usize = 48;
+
+/// Grace period between the polite SIGTERM and the forceful SIGKILL when a quit
+/// tears down in-flight git children.
+const KILL_GRACE: Duration = Duration::from_millis(1500);
+
+/// Send a signal to a single process (`pid > 0`). Errors (e.g. the process has
+/// already exited) are ignored on purpose.
+#[cfg(unix)]
+fn signal_pid(pid: i32, sig: i32) {
+    // SAFETY: `kill` is async-signal-safe and merely posts a signal; a stale pid
+    // yields ESRCH, which we intentionally ignore.
+    unsafe {
+        libc::kill(pid, sig);
+    }
+}
+
+#[cfg(not(unix))]
+fn signal_pid(_pid: i32, _sig: i32) {
+    // No POSIX signals off Unix; a quit falls back to waiting for git to finish.
+}
+
+#[cfg(unix)]
+const SIG_TERM: i32 = libc::SIGTERM;
+#[cfg(unix)]
+const SIG_KILL: i32 = libc::SIGKILL;
+#[cfg(not(unix))]
+const SIG_TERM: i32 = 15;
+#[cfg(not(unix))]
+const SIG_KILL: i32 = 9;
+
+/// Tracks the pids of in-flight git children so a quit from the TUI can signal
+/// them (SIGTERM, then SIGKILL) instead of blocking until every network op
+/// finishes. git's own ssh/helper subprocesses cascade-exit when git closes
+/// their pipes, so signalling git is enough to tear the operation down.
+pub(crate) struct CancelRegistry {
+    cancelled: AtomicBool,
+    /// repo index -> child pid, present only while that child is running.
+    running: Mutex<HashMap<usize, i32>>,
+}
+
+impl CancelRegistry {
+    fn new() -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+            running: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// Track a freshly-spawned child. If a quit already happened, signal it right
+    /// away so it doesn't outlive the cancel. Registration and [`cancel`] both
+    /// take the same lock, so no child can slip through unsignalled.
+    fn register(&self, idx: usize, pid: i32) {
+        let mut running = self.running.lock().unwrap();
+        running.insert(idx, pid);
+        if self.cancelled.load(Ordering::SeqCst) {
+            signal_pid(pid, SIG_TERM);
+        }
+    }
+
+    fn unregister(&self, idx: usize) {
+        self.running.lock().unwrap().remove(&idx);
+    }
+
+    /// Terminate every in-flight child, then escalate to SIGKILL after a grace
+    /// period for any that ignore SIGTERM (so a wedged process can't stall the
+    /// quit). Safe to call once per run.
+    pub(crate) fn cancel(self: &Arc<Self>) {
+        let pids: Vec<i32> = {
+            let running = self.running.lock().unwrap();
+            // Flip the flag under the lock so a concurrently-registering worker
+            // either shows up here or observes the flag and self-signals.
+            self.cancelled.store(true, Ordering::SeqCst);
+            running.values().copied().collect()
+        };
+        for pid in pids {
+            signal_pid(pid, SIG_TERM);
+        }
+        let reg = Arc::clone(self);
+        std::thread::spawn(move || {
+            std::thread::sleep(KILL_GRACE);
+            for pid in reg.running.lock().unwrap().values() {
+                signal_pid(*pid, SIG_KILL);
+            }
+        });
+    }
+}
 
 /// Trace sample for a completed repo (`None` when `GIT_ALL_TRACE` is off).
 type RepoCompletion = Option<RepoTraceSample>;
@@ -351,6 +443,10 @@ where
         None
     };
 
+    // Only the TUI has a quit key, so non-TUI runs skip the cancel registry and
+    // its per-child pid bookkeeping entirely.
+    let cancel: Option<Arc<CancelRegistry>> = use_tui.then(|| Arc::new(CancelRegistry::new()));
+
     let mut completions: Vec<Option<RepoCompletion>> = (0..repos.len()).map(|_| None).collect();
     let mut summary = TraceSummary::default();
 
@@ -361,10 +457,19 @@ where
         for (idx, _) in repos.iter().enumerate() {
             let tx = tx.clone();
             let sem = semaphore.clone();
+            let cancel = cancel.clone();
 
             s.spawn(move || {
                 if let Some(ref sem) = sem {
                     sem.acquire();
+                }
+                // A quit may have arrived while we waited for a worker slot; if
+                // so, don't start new git work.
+                if cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
+                    if let Some(ref sem) = sem {
+                        sem.release();
+                    }
+                    return;
                 }
                 if is_tty {
                     let _ = tx.send(RepoEvent::Started { idx });
@@ -375,7 +480,19 @@ where
                 let spawn_result = cmd.spawn(opts);
                 let spawn_ms = run_started_at.elapsed().as_millis();
                 let result = match spawn_result {
-                    Ok(child) => child.wait_with_output(),
+                    Ok(child) => {
+                        // Track the pid so a quit can signal it; drop it from the
+                        // registry as soon as it exits so we never signal a
+                        // reaped pid.
+                        if let Some(ref reg) = cancel {
+                            reg.register(idx, child.id() as i32);
+                        }
+                        let out = child.wait_with_output();
+                        if let Some(ref reg) = cancel {
+                            reg.unregister(idx);
+                        }
+                        out
+                    }
                     Err(err) => Err(err),
                 };
 
@@ -414,6 +531,7 @@ where
         if use_tui {
             // The TUI owns the receiver and renders the live full-screen view.
             let header = run_header(ctx, repos.len(), max_workers);
+            let cancel = cancel.clone().expect("use_tui implies a cancel registry");
             crate::tui::run(
                 rx,
                 &mut rows,
@@ -421,6 +539,7 @@ where
                 name_width,
                 run_started_at,
                 formatter,
+                cancel,
             )?;
         } else {
             let stdout = std::io::stdout().lock();
@@ -504,6 +623,36 @@ mod tests {
         let tiny = vec![root.join("a")];
         let tiny_width = compute_name_width(&tiny, &root);
         assert_eq!(tiny_width, MIN_REPO_NAME_WIDTH);
+    }
+
+    #[test]
+    fn cancel_registry_flips_flag() {
+        let reg = Arc::new(CancelRegistry::new());
+        assert!(!reg.is_cancelled());
+        // Empty registry: cancel has nothing to signal, it just flips the flag.
+        reg.cancel();
+        assert!(reg.is_cancelled());
+    }
+
+    #[test]
+    fn cancel_registry_tracks_running_children() {
+        // A non-cancelled registry only bookkeeps pids; it does not signal them,
+        // so this touches no real process.
+        let reg = CancelRegistry::new();
+        reg.register(0, 424_242);
+        reg.register(1, 424_243);
+        assert_eq!(reg.running.lock().unwrap().len(), 2);
+        reg.unregister(0);
+        assert!(!reg.is_cancelled());
+        assert_eq!(
+            reg.running
+                .lock()
+                .unwrap()
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
     }
 
     /// Test that large output (>64KB) doesn't cause pipe buffer deadlock.
