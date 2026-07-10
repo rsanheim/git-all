@@ -178,7 +178,10 @@ pub struct TtyTablePrinter<W: Write> {
     writer: W,
     terminal_columns: usize,
     repo_width: usize,
-    next_to_print: usize,
+    /// Which rows have already been streamed to scrollback, indexed by repo.
+    /// Rows print in completion order — the moment each repo finishes — so a
+    /// slow early repo no longer hides everything behind it.
+    printed: Vec<bool>,
     /// Lines the live footer currently occupies (0 when not drawn). The footer
     /// grows a line while repos are in flight, so its height varies.
     footer_height: u16,
@@ -196,7 +199,7 @@ impl<W: Write> TtyTablePrinter<W> {
             writer,
             terminal_columns,
             repo_width,
-            next_to_print: 0,
+            printed: Vec::new(),
             footer_height: 0,
             header: None,
         }
@@ -233,15 +236,26 @@ impl<W: Write> TtyTablePrinter<W> {
         )
     }
 
-    fn flush_finished_rows(&mut self, rows: &[RepoRow]) -> io::Result<Vec<usize>> {
+    /// Stream a single finished row to scrollback the moment it completes.
+    /// Returns whether it was printed (finished and not already shown).
+    fn flush_row(&mut self, rows: &[RepoRow], idx: usize) -> io::Result<bool> {
+        if idx >= self.printed.len() || self.printed[idx] || rows[idx].state != RowState::Finished {
+            return Ok(false);
+        }
+        let line = self.render_finished_row(&rows[idx]);
+        writeln!(self.writer, "{}", line)?;
+        self.printed[idx] = true;
+        Ok(true)
+    }
+
+    /// Flush any finished-but-unprinted rows in repo order (used on completion
+    /// to catch stragglers deterministically).
+    fn flush_remaining(&mut self, rows: &[RepoRow]) -> io::Result<Vec<usize>> {
         let mut printed = Vec::new();
-        while self.next_to_print < rows.len()
-            && rows[self.next_to_print].state == RowState::Finished
-        {
-            let row = &rows[self.next_to_print];
-            writeln!(self.writer, "{}", self.render_finished_row(row))?;
-            printed.push(self.next_to_print);
-            self.next_to_print += 1;
+        for idx in 0..rows.len() {
+            if self.flush_row(rows, idx)? {
+                printed.push(idx);
+            }
         }
         Ok(printed)
     }
@@ -312,6 +326,7 @@ impl<W: Write> TtyTablePrinter<W> {
 
 impl<W: Write> Printer for TtyTablePrinter<W> {
     fn start(&mut self, rows: &[RepoRow]) -> io::Result<()> {
+        self.printed = vec![false; rows.len()];
         if let Some(header) = self.header.clone() {
             let line = self.fit_line(&header);
             writeln!(self.writer, "{}", line)?;
@@ -322,18 +337,21 @@ impl<W: Write> Printer for TtyTablePrinter<W> {
     fn update_row(
         &mut self,
         rows: &[RepoRow],
-        _row_index: usize,
+        row_index: usize,
         elapsed_ms: u128,
     ) -> io::Result<Vec<usize>> {
         self.clear_footer()?;
-        let printed = self.flush_finished_rows(rows)?;
+        let mut printed = Vec::new();
+        if self.flush_row(rows, row_index)? {
+            printed.push(row_index);
+        }
         self.render_footer(rows, elapsed_ms)?;
         Ok(printed)
     }
 
     fn complete(&mut self, rows: &[RepoRow], elapsed_ms: u128) -> io::Result<Vec<usize>> {
         self.clear_footer()?;
-        let printed = self.flush_finished_rows(rows)?;
+        let printed = self.flush_remaining(rows)?;
         self.render_footer(rows, elapsed_ms)?;
         Ok(printed)
     }
@@ -627,7 +645,7 @@ mod tests {
     }
 
     #[test]
-    fn tty_table_printer_buffers_out_of_order_finished_rows_until_contiguous() {
+    fn tty_table_printer_streams_finished_rows_in_completion_order() {
         let mut rows = vec![
             RepoRow::running("activities".to_string()),
             RepoRow::running("agentic-dev".to_string()),
@@ -638,26 +656,30 @@ mod tests {
             let mut printer = TtyTablePrinter::new(output.clone(), 80, 14);
             printer.start(&rows).expect("tty start");
 
+            // agentic-dev (row 1) finishes first — it streams to scrollback
+            // immediately instead of waiting for the earlier activities.
             rows[1].mark_finished("clean".to_string());
-            let printed = printer.update_row(&rows, 1, 100).expect("tty late finish");
-            assert!(printed.is_empty(), "row 1 must buffer until row 0 finishes");
+            let printed = printer.update_row(&rows, 1, 100).expect("tty finish 1");
+            assert_eq!(printed, vec![1]);
             let mid = strip_ansi_sequences(&output.rendered());
             assert!(
-                !mid.contains("agentic-dev  clean"),
-                "agentic-dev row not yet flushed, got: {mid:?}"
+                mid.contains("[agentic-dev"),
+                "agentic-dev row should stream immediately, got: {mid:?}"
             );
 
             rows[0].mark_finished("clean".to_string());
-            let printed = printer
-                .update_row(&rows, 0, 200)
-                .expect("tty contiguous finish");
-            assert_eq!(printed, vec![0, 1]);
+            let printed = printer.update_row(&rows, 0, 200).expect("tty finish 0");
+            assert_eq!(printed, vec![0]);
         }
 
+        // Finished rows land in completion order: agentic-dev before activities.
         let stripped = strip_ansi_sequences(&output.rendered());
-        let activities_pos = stripped.find("activities").expect("activities printed");
-        let agentic_pos = stripped.find("agentic-dev").expect("agentic-dev printed");
-        assert!(activities_pos < agentic_pos);
+        let agentic_pos = stripped.find("[agentic-dev").expect("agentic-dev row");
+        let activities_pos = stripped.find("[activities").expect("activities row");
+        assert!(
+            agentic_pos < activities_pos,
+            "expected completion order (agentic-dev first), got: {stripped:?}"
+        );
     }
 
     #[test]

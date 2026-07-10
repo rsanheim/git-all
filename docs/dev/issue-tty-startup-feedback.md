@@ -22,8 +22,8 @@ A scope header and a live footer on the TTY path (`TtyTablePrinter` /
 Non-TTY / redirected output is unchanged: no header, no footer, no ANSI — plain
 completion rows only. Verified end-to-end under tmux for both `status` and
 `fetch` (clean in-place redraw, `MoveUp` only ever 2–3 lines, no scrollback
-pollution). Head-of-line blocking of the finished *rows* is unchanged and is what
-Option C would address next.
+pollution). Head-of-line blocking of the finished *rows* is addressed on top of
+this by Option C (completion-order flushing) — see the Recommendation below.
 
 Reproduce locally with `script/tty-lab`, which builds a throwaway workspace of
 fake repos behind a `git` latency shim so you can watch the live footer without
@@ -204,13 +204,17 @@ Two phases:
   scope line plus a live-ticking footer that shows what's in flight. This
   addresses the actual complaint ("no feedback / looks hung") without reopening
   the viewport complexity. Shipped; see *What Phase 1 shipped* above.
-* [ ] **Option C (optional follow-up):** completion-order flushing so finished
-  repo *rows* appear the instant they complete rather than waiting behind the
-  alphabetically-earliest unfinished repo. Deferred pending the default-vs-opt-in
-  decision below.
-* [ ] **Phase 2 (if Phase 1 isn't enough):** evaluate Option D or E as the
-  "full live table" north star, informed by whether Phase 1 already feels good on
-  `~/work` / `~/src/oss`.
+* [x] **Option C (this branch):** completion-order flushing so finished repo
+  *rows* appear the instant they complete rather than waiting behind the
+  alphabetically-earliest unfinished repo. On `~/work status` under a PTY this
+  took `delayed_repos` from 98 → 11, `max_ordered_wait_ms` from 1592 → 1, and
+  `first_print_ms` from 771 → 225 (= `first_exit_ms`), with `total_ms`
+  unchanged. The live TTY view now streams in completion order; non-TTY /
+  redirected output keeps its deterministic alphabetical order (unchanged
+  `PlainPrinter`), so pipes and scripts are unaffected.
+* [ ] **Phase 2 (if this isn't enough):** evaluate Option D or E as the
+  "full live table" north star (a ratatui prototype is being explored on a
+  parallel branch).
 
 This keeps the change proportional to the problem and preserves the sticky
 footer's wins (clean scrollback, simplicity, no height limit) while restoring the
