@@ -46,9 +46,9 @@ const TEXT: Color = Color::Gray;
 const HIGHLIGHT_BG: Color = Color::Indexed(236);
 const GAUGE_BG: Color = Color::Indexed(238);
 
-/// Per-repo visual outcome, derived from row state and the result string.
+/// Per-repo visual outcome, derived from row state and the command's result.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Outcome {
+pub(crate) enum Outcome {
     Pending,
     Running,
     Ok,
@@ -87,6 +87,26 @@ fn outcome_of(row: &RepoRow) -> Outcome {
     }
 }
 
+/// Decide a finished row's display text and outcome from its command result.
+/// The outcome is driven by exit status, so a failed command (e.g. a 404 fetch
+/// whose message doesn't contain "error"/"fatal") still counts as an error.
+fn finished_outcome(
+    result: &Result<std::process::Output, std::io::Error>,
+    formatter: &dyn OutputFormatter,
+) -> (String, Outcome) {
+    let failed = match result {
+        Ok(output) => !output.status.success(),
+        Err(_) => true,
+    };
+    let text = formatter.format_result(result);
+    let outcome = if failed {
+        Outcome::Error
+    } else {
+        classify_finished(&text)
+    };
+    (text, outcome)
+}
+
 /// Split finished results into green (nothing to do), yellow (something changed),
 /// and red (failed) buckets from the formatter's one-line summary.
 fn classify_finished(output: &str) -> Outcome {
@@ -114,13 +134,13 @@ struct Counts {
     pending: usize,
 }
 
-fn tally(rows: &[RepoRow]) -> Counts {
+fn tally(outcomes: &[Outcome]) -> Counts {
     let mut c = Counts {
-        total: rows.len(),
+        total: outcomes.len(),
         ..Counts::default()
     };
-    for row in rows {
-        match outcome_of(row) {
+    for &outcome in outcomes {
+        match outcome {
             Outcome::Pending => c.pending += 1,
             Outcome::Running => c.running += 1,
             Outcome::Ok => {
@@ -138,6 +158,16 @@ fn tally(rows: &[RepoRow]) -> Counts {
         }
     }
     c
+}
+
+/// Resolve each row's outcome for a frame. Finished rows use the outcome decided
+/// from their command's exit status at completion; if none was recorded (e.g. in
+/// tests), fall back to classifying the message. Pending/running come from state.
+fn row_outcomes(rows: &[RepoRow], finished: &[Option<Outcome>]) -> Vec<Outcome> {
+    rows.iter()
+        .enumerate()
+        .map(|(i, row)| finished[i].unwrap_or_else(|| outcome_of(row)))
+        .collect()
 }
 
 /// Index of the last repo that has left the pending state — the "leading edge"
@@ -194,7 +224,7 @@ pub(crate) fn run(
     started_at: Instant,
     formatter: &dyn OutputFormatter,
     cancel: Arc<CancelRegistry>,
-) -> Result<()> {
+) -> Result<Vec<Outcome>> {
     install_panic_hook();
     let _guard = TerminalGuard::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
@@ -203,6 +233,9 @@ pub(crate) fn run(
     let mut selected = 0usize;
     let mut user_quit = false;
     let last = rows.len().saturating_sub(1);
+    // Finished-row outcomes decided from each command's exit status (not its
+    // message text), so a failed fetch counts as an error rather than a change.
+    let mut finished: Vec<Option<Outcome>> = vec![None; rows.len()];
 
     loop {
         // Drain everything the workers have sent since the last frame.
@@ -211,7 +244,9 @@ pub(crate) fn run(
             match rx.try_recv() {
                 Ok(RepoEvent::Started { idx }) => rows[idx].mark_running(),
                 Ok(RepoEvent::Completed { idx, result, .. }) => {
-                    rows[idx].mark_finished(formatter.format_result(&result));
+                    let (text, outcome) = finished_outcome(&result, formatter);
+                    finished[idx] = Some(outcome);
+                    rows[idx].mark_finished(text);
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -226,8 +261,9 @@ pub(crate) fn run(
         }
         selected = selected.min(last);
 
+        let outcomes = row_outcomes(rows, &finished);
         let elapsed = started_at.elapsed();
-        terminal.draw(|f| draw(f, rows, header, name_width, elapsed, selected))?;
+        terminal.draw(|f| draw(f, rows, &outcomes, header, name_width, elapsed, selected))?;
 
         // Exit once the channel is closed and nothing is left in flight.
         if disconnected && rows.iter().all(|r| r.state == RowState::Finished) {
@@ -276,12 +312,13 @@ pub(crate) fn run(
         cancel.cancel();
     }
 
-    Ok(())
+    Ok(row_outcomes(rows, &finished))
 }
 
 fn draw(
     f: &mut Frame,
     rows: &[RepoRow],
+    outcomes: &[Outcome],
     header: &str,
     name_width: usize,
     elapsed: Duration,
@@ -297,8 +334,8 @@ fn draw(
         .split(f.area());
 
     render_header(f, chunks[0], header, elapsed);
-    render_table(f, chunks[1], rows, name_width, elapsed, selected);
-    render_footer(f, chunks[2], rows);
+    render_table(f, chunks[1], rows, outcomes, name_width, elapsed, selected);
+    render_footer(f, chunks[2], outcomes);
 }
 
 fn framed(title: &str) -> Block<'static> {
@@ -342,18 +379,19 @@ fn render_table(
     f: &mut Frame,
     area: Rect,
     rows: &[RepoRow],
+    outcomes: &[Outcome],
     name_width: usize,
     elapsed: Duration,
     selected: usize,
 ) {
-    let c = tally(rows);
+    let c = tally(outcomes);
     let block = framed(&format!("repositories · {}/{} done", c.done, c.total));
     let spinner = SPINNER[(elapsed.as_millis() / 90) as usize % SPINNER.len()];
 
     let table_rows: Vec<Row> = rows
         .iter()
-        .map(|row| {
-            let outcome = outcome_of(row);
+        .zip(outcomes)
+        .map(|(row, &outcome)| {
             let glyph = if outcome == Outcome::Running {
                 spinner
             } else {
@@ -425,8 +463,8 @@ fn render_table(
     }
 }
 
-fn render_footer(f: &mut Frame, area: Rect, rows: &[RepoRow]) {
-    let c = tally(rows);
+fn render_footer(f: &mut Frame, area: Rect, outcomes: &[Outcome]) {
+    let c = tally(outcomes);
     let block = framed("progress");
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -435,6 +473,18 @@ fn render_footer(f: &mut Frame, area: Rect, rows: &[RepoRow]) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Length(1)])
         .split(inner);
+
+    // Gauge line: progress bar on the left, key hints right-aligned. Keeping the
+    // hint up here lets the counts line below use the full width, so it never
+    // collides with the hint on a narrow terminal.
+    let hint = "q quit · j/k scroll";
+    let gauge_cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(10),
+            Constraint::Length(hint.len() as u16 + 1),
+        ])
+        .split(lines[0]);
 
     let ratio = if c.total == 0 {
         0.0
@@ -446,7 +496,13 @@ fn render_footer(f: &mut Frame, area: Rect, rows: &[RepoRow]) {
             .gauge_style(Style::default().fg(Color::Green).bg(GAUGE_BG))
             .ratio(ratio)
             .label(format!("{}/{}  {:.0}%", c.done, c.total, ratio * 100.0)),
-        lines[0],
+        gauge_cols[0],
+    );
+    f.render_widget(
+        Paragraph::new(Line::from(hint))
+            .alignment(Alignment::Right)
+            .style(Style::default().fg(MUTED)),
+        gauge_cols[1],
     );
 
     let status = Line::from(vec![
@@ -460,18 +516,7 @@ fn render_footer(f: &mut Frame, area: Rect, rows: &[RepoRow]) {
         Span::raw("   "),
         count_span("○", c.pending, "pending", MUTED),
     ]);
-
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(10), Constraint::Length(20)])
-        .split(lines[1]);
-    f.render_widget(Paragraph::new(status), cols[0]);
-    f.render_widget(
-        Paragraph::new(Line::from("q quit · j/k scroll"))
-            .alignment(Alignment::Right)
-            .style(Style::default().fg(MUTED)),
-        cols[1],
-    );
+    f.render_widget(Paragraph::new(status), lines[1]);
 }
 
 fn count_span(glyph: &str, n: usize, label: &str, color: Color) -> Span<'static> {
@@ -491,6 +536,7 @@ fn fmt_elapsed(elapsed: Duration) -> String {
 /// alt-screen closes, since its contents vanish on exit.
 pub(crate) fn print_summary(
     rows: &[RepoRow],
+    outcomes: &[Outcome],
     header: &str,
     name_width: usize,
     elapsed_ms: u128,
@@ -505,7 +551,7 @@ pub(crate) fn print_summary(
             row.output
         )?;
     }
-    let c = tally(rows);
+    let c = tally(outcomes);
     writeln!(
         out,
         "{} of {} done · {} ok · {} changed · {} error · {:.1}s",
@@ -552,7 +598,9 @@ mod tests {
 
     #[test]
     fn tally_counts_each_state() {
-        let c = tally(&rows());
+        let data = rows();
+        let outcomes = row_outcomes(&data, &vec![None; data.len()]);
+        let c = tally(&outcomes);
         assert_eq!(c.total, 5);
         assert_eq!(c.done, 3);
         assert_eq!(c.ok, 1);
@@ -560,6 +608,44 @@ mod tests {
         assert_eq!(c.error, 1);
         assert_eq!(c.running, 1);
         assert_eq!(c.pending, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finished_outcome_uses_exit_status_not_wording() {
+        use std::os::unix::process::ExitStatusExt;
+
+        struct Fmt;
+        impl OutputFormatter for Fmt {
+            fn format(&self, output: &std::process::Output) -> String {
+                if output.status.success() {
+                    "no new commits".to_string()
+                } else {
+                    String::from_utf8_lossy(&output.stderr)
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .to_string()
+                }
+            }
+        }
+        let out = |ok: bool, stderr: &str| std::process::Output {
+            status: std::process::ExitStatus::from_raw(if ok { 0 } else { 256 }),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        };
+
+        // A failed fetch whose message reads benignly is still an error.
+        let (text, oc) = finished_outcome(&Ok(out(false, "remote: Repository not found.")), &Fmt);
+        assert_eq!(oc, Outcome::Error);
+        assert_eq!(text, "remote: Repository not found.");
+
+        // A spawn failure is an error.
+        let err = Err(std::io::Error::other("boom"));
+        assert_eq!(finished_outcome(&err, &Fmt).1, Outcome::Error);
+
+        // A successful result classifies by its message.
+        assert_eq!(finished_outcome(&Ok(out(true, "")), &Fmt).1, Outcome::Ok);
     }
 
     #[test]
@@ -579,11 +665,13 @@ mod tests {
         let backend = TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let data = rows();
+        let outcomes = row_outcomes(&data, &vec![None; data.len()]);
         terminal
             .draw(|f| {
                 draw(
                     f,
                     &data,
+                    &outcomes,
                     "git-all status · 5 repos · ~/work · 8 workers",
                     14,
                     Duration::from_millis(1200),

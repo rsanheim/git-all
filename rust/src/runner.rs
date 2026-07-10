@@ -532,7 +532,7 @@ where
             // The TUI owns the receiver and renders the live full-screen view.
             let header = run_header(ctx, repos.len(), max_workers);
             let cancel = cancel.clone().expect("use_tui implies a cancel registry");
-            crate::tui::run(
+            let outcomes = crate::tui::run(
                 rx,
                 &mut rows,
                 &header,
@@ -541,6 +541,11 @@ where
                 formatter,
                 cancel,
             )?;
+            // The alt-screen is gone once `run` returns; leave a plain record in
+            // scrollback, using the TUI's exit-status-based outcomes so the
+            // summary counts match what the live footer showed.
+            let total_ms = run_started_at.elapsed().as_millis();
+            crate::tui::print_summary(&rows, &outcomes, &header, name_width, total_ms)?;
         } else {
             let stdout = std::io::stdout().lock();
             let mut printer: Box<dyn Printer + '_> = if is_tty {
@@ -592,12 +597,10 @@ where
         Ok(())
     })?;
 
-    let total_ms = run_started_at.elapsed().as_millis();
-    if use_tui {
-        // Alt-screen output vanishes on exit, so leave a plain record behind.
-        let header = run_header(ctx, repos.len(), max_workers);
-        crate::tui::print_summary(&rows, &header, name_width, total_ms)?;
-    } else {
+    // The TUI prints its own scrollback summary above (it needs the outcomes it
+    // computed). Non-TUI runs still emit the trace summary here.
+    if !use_tui {
+        let total_ms = run_started_at.elapsed().as_millis();
         ctx.trace_mut()
             .emit_summary(repos.len(), &summary, total_ms)?;
     }
