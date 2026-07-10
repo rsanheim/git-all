@@ -51,7 +51,9 @@ const MAX_REPO_NAME_WIDTH_CAP: usize = 48;
 /// Trace sample for a completed repo (`None` when `GIT_ALL_TRACE` is off).
 type RepoCompletion = Option<RepoTraceSample>;
 
-enum RepoEvent {
+/// Live execution events emitted by the parallel runner. The TUI consumes these
+/// directly (it owns the receiver), so the type is visible crate-wide.
+pub(crate) enum RepoEvent {
     Started {
         idx: usize,
     },
@@ -82,6 +84,37 @@ fn compute_name_width(repos: &[PathBuf], display_root: &Path) -> usize {
     capped.max(MIN_REPO_NAME_WIDTH)
 }
 
+/// One-line scope banner shown in the TUI header, e.g.
+/// `git-all fetch · 98 repos · ~/work · 16 workers`.
+fn run_header(ctx: &ExecutionContext, repo_count: usize, max_workers: usize) -> String {
+    let workers = match max_workers {
+        0 => "unlimited workers".to_string(),
+        1 => "1 worker".to_string(),
+        n => format!("{n} workers"),
+    };
+    format!(
+        "git-all {} · {} repo{} · {} · {}",
+        ctx.command_label(),
+        repo_count,
+        if repo_count == 1 { "" } else { "s" },
+        abbreviate_home(ctx.display_root()),
+        workers,
+    )
+}
+
+/// Render a path with `$HOME` collapsed to `~` for a shorter, friendlier banner.
+fn abbreviate_home(path: &Path) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    if home.is_empty() {
+        return path.display().to_string();
+    }
+    match path.strip_prefix(&home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => path.display().to_string(),
+    }
+}
+
 /// Cross-cutting options that apply to every git invocation in a run.
 #[derive(Clone, Copy)]
 pub struct GitInvocationOptions {
@@ -96,6 +129,7 @@ pub struct ExecutionContext {
     ssh_multiplexing: bool,
     max_connections: usize,
     display_root: PathBuf,
+    command_label: String,
     trace: TraceSink,
 }
 
@@ -106,6 +140,7 @@ impl ExecutionContext {
         ssh_multiplexing: bool,
         max_connections: usize,
         display_root: PathBuf,
+        command_label: String,
         trace: TraceSink,
     ) -> Self {
         Self {
@@ -114,12 +149,19 @@ impl ExecutionContext {
             ssh_multiplexing,
             max_connections,
             display_root,
+            command_label,
             trace,
         }
     }
 
     pub fn is_dry_run(&self) -> bool {
         self.dry_run
+    }
+
+    /// The git subcommand for this run (e.g. `status`, `fetch`), used in the
+    /// TUI's scope banner.
+    pub fn command_label(&self) -> &str {
+        &self.command_label
     }
 
     pub fn git_invocation_options(&self) -> GitInvocationOptions {
@@ -280,15 +322,21 @@ where
     }
 
     let name_width = compute_name_width(repos, ctx.display_root());
+    let max_workers = ctx.max_connections();
     let run_started_at = Instant::now();
     let mut rows: Vec<RepoRow> = repos
         .iter()
         .map(|repo| RepoRow::pending(repo_display_name(repo, ctx.display_root())))
         .collect();
+
     let stdout = std::io::stdout();
     let is_tty = stdout.is_tty();
-    // 0 means the terminal did not report a size; the printer falls back to a
-    // sensible default. A real width (however small) is passed through as-is.
+    // The full-screen ratatui TUI takes over an interactive terminal. Trace mode
+    // writes structured records to stderr/a file and must stay plain, so it falls
+    // back to the line printers.
+    let use_tui = is_tty && !trace_enabled;
+    // 0 means the terminal did not report a size; the line printer falls back to
+    // a sensible default. A real width (however small) is passed through as-is.
     let terminal_columns = if is_tty {
         terminal_size()
             .map(|(columns, _rows)| columns as usize)
@@ -296,15 +344,6 @@ where
     } else {
         0
     };
-    let stdout = stdout.lock();
-    let mut printer: Box<dyn Printer + '_> = if is_tty {
-        Box::new(TtyTablePrinter::new(stdout, terminal_columns, name_width))
-    } else {
-        Box::new(PlainPrinter::new(stdout, name_width))
-    };
-    printer.start(&rows)?;
-
-    let max_workers = ctx.max_connections();
 
     let semaphore = if max_workers > 0 && max_workers < repos.len() {
         Some(Arc::new(Semaphore::new(max_workers)))
@@ -372,41 +411,77 @@ where
         }
         drop(tx);
 
-        for event in rx {
-            match event {
-                RepoEvent::Started { idx } => {
-                    rows[idx].mark_running();
-                    let elapsed_ms = run_started_at.elapsed().as_millis();
-                    let _ = printer.update_row(&rows, idx, elapsed_ms)?;
-                }
-                RepoEvent::Completed {
-                    idx,
-                    result,
-                    trace_sample,
-                } => {
-                    rows[idx].mark_finished(formatter.format_result(&result));
-                    completions[idx] = Some(trace_sample);
-                    let elapsed_ms = run_started_at.elapsed().as_millis();
-                    let printed = printer.update_row(&rows, idx, elapsed_ms)?;
-                    emit_traces_for_printed_rows(
-                        ctx,
-                        repos,
-                        &completions,
-                        &printed,
-                        elapsed_ms,
-                        &mut summary,
-                    )?;
+        if use_tui {
+            // The TUI owns the receiver and renders the live full-screen view.
+            let header = run_header(ctx, repos.len(), max_workers);
+            crate::tui::run(
+                rx,
+                &mut rows,
+                &header,
+                name_width,
+                run_started_at,
+                formatter,
+            )?;
+        } else {
+            let stdout = std::io::stdout().lock();
+            let mut printer: Box<dyn Printer + '_> = if is_tty {
+                Box::new(TtyTablePrinter::new(stdout, terminal_columns, name_width))
+            } else {
+                Box::new(PlainPrinter::new(stdout, name_width))
+            };
+            printer.start(&rows)?;
+
+            for event in rx {
+                match event {
+                    RepoEvent::Started { idx } => {
+                        rows[idx].mark_running();
+                        let elapsed_ms = run_started_at.elapsed().as_millis();
+                        let _ = printer.update_row(&rows, idx, elapsed_ms)?;
+                    }
+                    RepoEvent::Completed {
+                        idx,
+                        result,
+                        trace_sample,
+                    } => {
+                        rows[idx].mark_finished(formatter.format_result(&result));
+                        completions[idx] = Some(trace_sample);
+                        let elapsed_ms = run_started_at.elapsed().as_millis();
+                        let printed = printer.update_row(&rows, idx, elapsed_ms)?;
+                        emit_traces_for_printed_rows(
+                            ctx,
+                            repos,
+                            &completions,
+                            &printed,
+                            elapsed_ms,
+                            &mut summary,
+                        )?;
+                    }
                 }
             }
+
+            let total_ms = run_started_at.elapsed().as_millis();
+            let printed = printer.complete(&rows, total_ms)?;
+            emit_traces_for_printed_rows(
+                ctx,
+                repos,
+                &completions,
+                &printed,
+                total_ms,
+                &mut summary,
+            )?;
         }
         Ok(())
     })?;
 
     let total_ms = run_started_at.elapsed().as_millis();
-    let printed = printer.complete(&rows, total_ms)?;
-    emit_traces_for_printed_rows(ctx, repos, &completions, &printed, total_ms, &mut summary)?;
-    ctx.trace_mut()
-        .emit_summary(repos.len(), &summary, total_ms)?;
+    if use_tui {
+        // Alt-screen output vanishes on exit, so leave a plain record behind.
+        let header = run_header(ctx, repos.len(), max_workers);
+        crate::tui::print_summary(&rows, &header, name_width, total_ms)?;
+    } else {
+        ctx.trace_mut()
+            .emit_summary(repos.len(), &summary, total_ms)?;
+    }
 
     Ok(())
 }
