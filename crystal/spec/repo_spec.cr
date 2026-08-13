@@ -42,6 +42,18 @@ describe Repo do
       end
     end
 
+    it "does not follow symlinks during discovery" do
+      with_tempdir do |tmpdir|
+        real_repo = File.join(tmpdir, "real-repo")
+        Dir.mkdir(real_repo)
+        Dir.mkdir(File.join(real_repo, ".git"))
+        File.symlink(real_repo, File.join(tmpdir, "link-repo"))
+
+        repos = Repo.discover(tmpdir)
+        repos.should eq([real_repo])
+      end
+    end
+
     it "returns repos in sorted order" do
       with_tempdir do |tmpdir|
         # Create repos in reverse alphabetical order

@@ -6,6 +6,7 @@ module Repo
 
     Dir.each_child(path) do |entry|
       full_path = File.join(path, entry)
+      next if File.symlink?(full_path)
       next unless File.directory?(full_path)
 
       git_path = File.join(full_path, ".git")
