@@ -157,35 +157,42 @@ impl GitCommand {
         Self { repo_path, args }
     }
 
-    /// Spawn the git command without waiting for completion.
-    /// Returns immediately with a Child process handle.
-    pub fn spawn(&self, opts: GitInvocationOptions) -> std::io::Result<std::process::Child> {
-        let mut cmd = Command::new("git");
+    /// Build the full `git` argument list for the given options. This is the
+    /// single source of truth for what gets executed: both spawn() and
+    /// command_string() (dry-run display) derive from it, so dry-run output
+    /// can never drift from what actually runs.
+    fn build_args(&self, opts: GitInvocationOptions) -> Vec<String> {
+        let mut args = Vec::new();
 
         // Inject URL scheme override if specified (must come before other args)
         if let Some(scheme) = opts.url_scheme {
-            match scheme {
-                UrlScheme::Ssh => {
-                    cmd.arg("-c")
-                        .arg("url.git@github.com:.insteadOf=https://github.com/");
-                }
-                UrlScheme::Https => {
-                    cmd.arg("-c")
-                        .arg("url.https://github.com/.insteadOf=git@github.com:");
-                }
-            }
+            let insteadof = match scheme {
+                UrlScheme::Ssh => "url.git@github.com:.insteadOf=https://github.com/",
+                UrlScheme::Https => "url.https://github.com/.insteadOf=git@github.com:",
+            };
+            args.push("-c".to_string());
+            args.push(insteadof.to_string());
         }
 
         // Disable SSH ControlMaster multiplexing by default; it serializes
         // otherwise-parallel network git operations and tanks throughput.
         if !opts.ssh_multiplexing {
-            cmd.arg("-c")
-                .arg("core.sshCommand=ssh -o ControlMaster=no -o ControlPath=none");
+            args.push("-c".to_string());
+            args.push("core.sshCommand=ssh -o ControlMaster=no -o ControlPath=none".to_string());
         }
 
-        cmd.arg("-C")
-            .arg(&self.repo_path)
-            .args(&self.args)
+        args.push("-C".to_string());
+        args.push(self.repo_path.display().to_string());
+        args.extend(self.args.iter().cloned());
+
+        args
+    }
+
+    /// Spawn the git command without waiting for completion.
+    /// Returns immediately with a Child process handle.
+    pub fn spawn(&self, opts: GitInvocationOptions) -> std::io::Result<std::process::Child> {
+        Command::new("git")
+            .args(self.build_args(opts))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -195,23 +202,15 @@ impl GitCommand {
 
     /// Build the full command string for display (used in dry-run)
     pub fn command_string(&self, opts: GitInvocationOptions) -> String {
-        let scheme_args = match opts.url_scheme {
-            Some(UrlScheme::Ssh) => "-c \"url.git@github.com:.insteadOf=https://github.com/\" ",
-            Some(UrlScheme::Https) => "-c \"url.https://github.com/.insteadOf=git@github.com:\" ",
-            None => "",
-        };
-        let ssh_args = if opts.ssh_multiplexing {
-            ""
-        } else {
-            "-c \"core.sshCommand=ssh -o ControlMaster=no -o ControlPath=none\" "
-        };
-        format!(
-            "git {}{}-C {} {}",
-            scheme_args,
-            ssh_args,
-            self.repo_path.display(),
-            self.args.join(" ")
-        )
+        let mut parts = vec!["git".to_string()];
+        for arg in self.build_args(opts) {
+            if arg.contains(' ') {
+                parts.push(format!("\"{}\"", arg));
+            } else {
+                parts.push(arg);
+            }
+        }
+        parts.join(" ")
     }
 }
 
@@ -414,6 +413,53 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_command_string_includes_ssh_scheme_override() {
+        let cmd = GitCommand::new(PathBuf::from("/repo"), vec!["fetch".to_string()]);
+        let opts = GitInvocationOptions {
+            url_scheme: Some(UrlScheme::Ssh),
+            ssh_multiplexing: true,
+        };
+        assert_eq!(
+            cmd.command_string(opts),
+            "git -c url.git@github.com:.insteadOf=https://github.com/ -C /repo fetch"
+        );
+    }
+
+    #[test]
+    fn test_command_string_quotes_ssh_multiplexing_override() {
+        let cmd = GitCommand::new(PathBuf::from("/repo"), vec!["fetch".to_string()]);
+        let opts = GitInvocationOptions {
+            url_scheme: None,
+            ssh_multiplexing: false,
+        };
+        assert_eq!(
+            cmd.command_string(opts),
+            r#"git -c "core.sshCommand=ssh -o ControlMaster=no -o ControlPath=none" -C /repo fetch"#
+        );
+    }
+
+    /// spawn() and command_string() must derive from the same build_args(),
+    /// so the exact args passed to the spawned Command match what dry-run
+    /// displays (SPEC 6.1.1: dry-run MUST NOT be constructed separately from
+    /// execution logic).
+    #[test]
+    fn test_command_string_args_match_build_args() {
+        let cmd = GitCommand::new(PathBuf::from("/repo"), vec!["status".to_string()]);
+        let opts = GitInvocationOptions {
+            url_scheme: Some(UrlScheme::Https),
+            ssh_multiplexing: false,
+        };
+        let args = cmd.build_args(opts);
+        let rendered = cmd.command_string(opts);
+        for arg in &args {
+            assert!(
+                rendered.contains(arg.as_str()),
+                "command_string {rendered:?} missing build_args entry {arg:?}"
+            );
+        }
+    }
 
     #[test]
     fn test_compute_name_width_caps_and_min() {

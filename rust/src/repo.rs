@@ -72,7 +72,9 @@ fn scan_dir(
     repos: &mut Vec<PathBuf>,
 ) -> Result<()> {
     for entry in fs::read_dir(dir)? {
-        let entry = entry?;
+        let Ok(entry) = entry else {
+            continue;
+        };
         let path = entry.path();
 
         let Ok(file_type) = entry.file_type() else {
@@ -92,7 +94,10 @@ fn scan_dir(
             let next_depth = depth + 1;
             let should_descend = max_depth.is_none_or(|max| next_depth < max);
             if should_descend {
-                scan_dir(&path, next_depth, max_depth, repos)?;
+                // A subdirectory that's unreadable (permissions, or removed
+                // mid-scan) shouldn't abort discovery for the rest of the
+                // workspace; skip that subtree and keep going.
+                let _ = scan_dir(&path, next_depth, max_depth, repos);
             }
         }
     }
@@ -201,6 +206,28 @@ mod tests {
         depth_all.sort();
         expected_depth_all.sort();
         assert_eq!(depth_all, expected_depth_all);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_find_git_repos_skips_unreadable_subdirectory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path();
+
+        create_repo(root.join("good-repo"), true);
+
+        let blocked = root.join("blocked");
+        create_repo(blocked.join("hidden-repo"), true);
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).expect("chmod 000");
+
+        let result = find_git_repos_in(root, ScanDepth::All);
+
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755))
+            .expect("restore permissions for cleanup");
+
+        assert_eq!(result.unwrap(), vec![root.join("good-repo")]);
     }
 
     #[test]
