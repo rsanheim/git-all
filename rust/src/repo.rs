@@ -75,7 +75,14 @@ fn scan_dir(
         let entry = entry?;
         let path = entry.path();
 
-        if path.is_dir() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+
+        if file_type.is_dir() {
             let git_dir = path.join(".git");
             if git_dir.exists() {
                 repos.push(path);
@@ -83,7 +90,7 @@ fn scan_dir(
             }
 
             let next_depth = depth + 1;
-            let should_descend = max_depth.map_or(true, |max| next_depth < max);
+            let should_descend = max_depth.is_none_or(|max| next_depth < max);
             if should_descend {
                 scan_dir(&path, next_depth, max_depth, repos)?;
             }
@@ -194,6 +201,28 @@ mod tests {
         depth_all.sort();
         expected_depth_all.sort();
         assert_eq!(depth_all, expected_depth_all);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_find_git_repos_skips_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path();
+
+        create_repo(root.join("real-repo"), true);
+        symlink(root.join("real-repo"), root.join("link-to-repo")).expect("create symlink");
+
+        fs::create_dir_all(root.join("plain-dir")).expect("create plain dir");
+        create_repo(root.join("plain-dir/nested-repo"), true);
+        symlink(root.join("plain-dir"), root.join("link-to-dir")).expect("create symlink");
+
+        let repos = find_git_repos_in(root, ScanDepth::All).unwrap();
+        assert_eq!(
+            repos,
+            vec![root.join("plain-dir/nested-repo"), root.join("real-repo")]
+        );
     }
 
     fn create_repo(path: PathBuf, git_dir: bool) {

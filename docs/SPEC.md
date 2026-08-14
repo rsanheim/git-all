@@ -1,6 +1,6 @@
 # git-all Specification
 
-Version: 0.2.3
+Version: 0.2.4
 Status: Draft
 
 ## Abstract
@@ -68,7 +68,9 @@ If `git-all meta` is not found, the implementation MUST continue with the next o
 
 7. The implementation MUST NOT descend into discovered repositories (no nested repository discovery).
 
-8. Repository order in output SHOULD be deterministic. Alphabetical sorting by directory name is RECOMMENDED.
+8. The implementation MUST NOT follow symlinks during discovery; any symlink encountered MUST be skipped, regardless of what it resolves to. This prevents the same repository from being discovered twice when it is reachable both directly and through a symlink.
+
+9. Repository order in output SHOULD be deterministic. Alphabetical sorting by directory name is RECOMMENDED.
 
 ### 2.2 Empty Results
 
@@ -373,6 +375,10 @@ ARGS:
 * [Git Documentation](https://git-scm.com/docs)
 
 ## Appendix C: Changelog
+
+### v0.2.4 (2026-08-12)
+
+* Added Section 2.1 rule requiring discovery to skip symlinks rather than follow them, so a repository reachable both directly and through a symlink is not discovered (and run against) twice
 
 ### v0.2.3 (2026-05-07)
 
