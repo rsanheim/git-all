@@ -12,6 +12,7 @@ mod printer;
 mod repo;
 mod runner;
 mod trace;
+mod tui;
 
 use commands::{fetch, passthrough, pull, status};
 use repo::{ScanDepth, find_git_repos_in, is_inside_git_repo, parse_scan_depth};
@@ -188,6 +189,7 @@ pub fn run() -> Result<()> {
         cli.ssh_multiplexing,
         workers,
         cwd,
+        command_label(&cli.command).to_string(),
         trace,
     );
 
