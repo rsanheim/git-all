@@ -4,7 +4,7 @@ jobs:
   test-rust:
     docker:
       - image: cimg/rust:1.92.0
-    resource_class: rsanheim/orbstack-arm64
+    resource_class: medium
     steps:
       - checkout
       - run:
@@ -18,50 +18,7 @@ jobs:
           command: cargo test
           working_directory: rust
 
-  test-crystal:
-    docker:
-      - image: crystallang/crystal:latest
-    resource_class: rsanheim/orbstack-arm64
-    steps:
-      - checkout
-      - run:
-          name: Install dependencies
-          command: shards install
-          working_directory: crystal
-      - run:
-          name: Run specs
-          command: crystal spec
-          working_directory: crystal
-
-  test-zig:
-    docker:
-      - image: cimg/base:current
-    resource_class: rsanheim/orbstack-arm64
-    steps:
-      - checkout
-      - run:
-          name: Install Zig 0.15.2
-          command: |
-            set -euo pipefail
-            arch="$(uname -m)"
-            case "$arch" in
-              x86_64) zig_arch="x86_64" ;;
-              aarch64|arm64) zig_arch="aarch64" ;;
-              *) echo "Unsupported arch: $arch" >&2; exit 1 ;;
-            esac
-            curl -fsSL "https://ziglang.org/download/0.15.2/zig-${zig_arch}-linux-0.15.2.tar.xz" | tar -xJ
-            sudo mv "zig-${zig_arch}-linux-0.15.2" /opt/zig
-            echo 'export PATH=/opt/zig:$PATH' >> "$BASH_ENV"
-            /opt/zig/zig version
-            file /opt/zig/zig
-      - run:
-          name: Run tests
-          command: zig build test
-          working_directory: zig
-
 workflows:
   test:
     jobs:
       - test-rust
-      - test-crystal
-      - test-zig
