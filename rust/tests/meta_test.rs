@@ -35,6 +35,28 @@ fn meta_help_shows_same_output() {
 }
 
 #[test]
+fn meta_detected_even_with_preceding_global_flag() {
+    // Run from inside this crate's own git repo, matching how `git-all meta`
+    // is typically invoked in practice (from inside one of many repos).
+    let output = Command::new(env!("CARGO_BIN_EXE_git-all"))
+        .args(["--dry-run", "meta", "help"])
+        .output()
+        .expect("failed to execute");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("git-all v"),
+        "expected git-all's own meta help, got stdout={stdout:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn meta_unknown_subcommand_fails() {
     let output = Command::new(env!("CARGO_BIN_EXE_git-all"))
         .args(["meta", "unknown"])

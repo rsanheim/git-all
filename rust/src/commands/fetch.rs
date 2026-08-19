@@ -24,7 +24,9 @@ impl OutputFormatter for FetchFormatter {
             return "no new commits".to_string();
         }
 
-        let (branch_count, tag_count) = stdout
+        // git fetch writes its ref-update summary lines ("abc..def main ->
+        // origin/main", " * [new tag] ...") to stderr, not stdout.
+        let (branch_count, tag_count) = stderr
             .lines()
             .filter(|l| l.contains("->") || l.contains("[new"))
             .fold((0, 0), |(b, t), l| {
@@ -111,45 +113,45 @@ mod tests {
     #[test]
     fn test_single_branch_update() {
         let formatter = FetchFormatter;
-        let output = make_output("   abc123..def456  main       -> origin/main\n", "", true);
+        let output = make_output("", "   abc123..def456  main       -> origin/main\n", true);
         assert_eq!(formatter.format(&output), "1 branch updated");
     }
 
     #[test]
     fn test_multiple_branch_updates() {
         let formatter = FetchFormatter;
-        let stdout = "   abc123..def456  main       -> origin/main\n   111222..333444  develop    -> origin/develop\n";
-        let output = make_output(stdout, "", true);
+        let stderr = "   abc123..def456  main       -> origin/main\n   111222..333444  develop    -> origin/develop\n";
+        let output = make_output("", stderr, true);
         assert_eq!(formatter.format(&output), "2 branches updated");
     }
 
     #[test]
     fn test_single_tag() {
         let formatter = FetchFormatter;
-        let output = make_output(" * [new tag]         v1.0.0     -> v1.0.0\n", "", true);
+        let output = make_output("", " * [new tag]         v1.0.0     -> v1.0.0\n", true);
         assert_eq!(formatter.format(&output), "1 tag updated");
     }
 
     #[test]
     fn test_multiple_tags() {
         let formatter = FetchFormatter;
-        let stdout = " * [new tag]         v1.0.0     -> v1.0.0\n * [new tag]         v1.0.1     -> v1.0.1\n";
-        let output = make_output(stdout, "", true);
+        let stderr = " * [new tag]         v1.0.0     -> v1.0.0\n * [new tag]         v1.0.1     -> v1.0.1\n";
+        let output = make_output("", stderr, true);
         assert_eq!(formatter.format(&output), "2 tags updated");
     }
 
     #[test]
     fn test_mixed_branches_and_tags() {
         let formatter = FetchFormatter;
-        let stdout = "   abc123..def456  main       -> origin/main\n * [new tag]         v1.0.0     -> v1.0.0\n";
-        let output = make_output(stdout, "", true);
+        let stderr = "   abc123..def456  main       -> origin/main\n * [new tag]         v1.0.0     -> v1.0.0\n";
+        let output = make_output("", stderr, true);
         assert_eq!(formatter.format(&output), "1 branch, 1 tag updated");
     }
 
     #[test]
     fn test_fallback_to_fetched() {
         let formatter = FetchFormatter;
-        let output = make_output("some other output\n", "", true);
+        let output = make_output("", "some other output\n", true);
         assert_eq!(formatter.format(&output), "fetched");
     }
 }

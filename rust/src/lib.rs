@@ -144,19 +144,26 @@ fn passthrough_to_git() -> ! {
 
 pub fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let is_meta = args.first().map(|s| s == "meta").unwrap_or(false);
 
-    if !is_meta && is_inside_git_repo() {
+    // Detect meta mode using the real clap grammar (the single source of
+    // truth for the CLI) rather than just args.first(), so that global
+    // flags preceding `meta` (e.g. `--dry-run meta help`) are still
+    // recognized. This must take priority over the inside-repo passthrough
+    // check below, regardless of flag ordering.
+    let argv0 = std::iter::once("git-all".to_string());
+    if let Ok(cli) = Cli::try_parse_from(argv0.chain(args.iter().cloned()))
+        && let Some(Commands::Meta { args }) = &cli.command
+    {
+        meta::run(args);
+        return Ok(());
+    }
+
+    if is_inside_git_repo() {
         passthrough_to_git();
     }
 
     let mut trace = TraceSink::from_env()?;
     let cli = Cli::parse();
-
-    if let Some(Commands::Meta { args }) = &cli.command {
-        meta::run(args);
-        return Ok(());
-    }
 
     let cwd = std::env::current_dir()?;
     let scan_started_at = Instant::now();

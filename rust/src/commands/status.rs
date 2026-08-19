@@ -39,6 +39,7 @@ impl OutputFormatter for StatusFormatter {
                 'A' => added += 1,
                 'D' => deleted += 1,
                 'R' => renamed += 1,
+                'U' => modified += 1,
                 _ => {}
             }
 
@@ -97,4 +98,33 @@ pub fn run(ctx: &mut ExecutionContext, repos: &[PathBuf], extra_args: &[String])
         },
         &formatter,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+
+    fn make_output(stdout: &str) -> Output {
+        Output {
+            status: ExitStatus::from_raw(0),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_unmerged_conflict_is_not_clean() {
+        let formatter = StatusFormatter;
+        let output = make_output("## main\nUU conflicted.txt\n");
+        assert_eq!(formatter.format(&output), "1 modified");
+    }
+
+    #[test]
+    fn test_clean_with_no_changes() {
+        let formatter = StatusFormatter;
+        let output = make_output("## main\n");
+        assert_eq!(formatter.format(&output), "clean");
+    }
 }
