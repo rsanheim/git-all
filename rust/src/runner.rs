@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::printer::{PlainPrinter, Printer, RepoRow, TtyTablePrinter};
 use crate::repo::repo_display_name;
@@ -48,6 +48,10 @@ impl Semaphore {
 const MIN_REPO_NAME_WIDTH: usize = 4;
 const MAX_REPO_NAME_WIDTH_CAP: usize = 48;
 
+/// How often the live footer is redrawn while waiting for repos to finish, so
+/// the elapsed clock advances even when no repo has completed yet.
+const TICK_INTERVAL: Duration = Duration::from_millis(200);
+
 /// Trace sample for a completed repo (`None` when `GIT_ALL_TRACE` is off).
 type RepoCompletion = Option<RepoTraceSample>;
 
@@ -82,6 +86,37 @@ fn compute_name_width(repos: &[PathBuf], display_root: &Path) -> usize {
     capped.max(MIN_REPO_NAME_WIDTH)
 }
 
+/// One-line scope banner shown above the live footer on a TTY, e.g.
+/// `git-all fetch · 98 repos · ~/work · 16 workers`.
+fn run_header(ctx: &ExecutionContext, repo_count: usize, max_workers: usize) -> String {
+    let workers = match max_workers {
+        0 => "unlimited workers".to_string(),
+        1 => "1 worker".to_string(),
+        n => format!("{n} workers"),
+    };
+    format!(
+        "git-all {} · {} repo{} · {} · {}",
+        ctx.command_label(),
+        repo_count,
+        if repo_count == 1 { "" } else { "s" },
+        abbreviate_home(ctx.display_root()),
+        workers,
+    )
+}
+
+/// Render a path with `$HOME` collapsed to `~` for a shorter, friendlier banner.
+fn abbreviate_home(path: &Path) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    if home.is_empty() {
+        return path.display().to_string();
+    }
+    match path.strip_prefix(&home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => path.display().to_string(),
+    }
+}
+
 /// Cross-cutting options that apply to every git invocation in a run.
 #[derive(Clone, Copy)]
 pub struct GitInvocationOptions {
@@ -96,6 +131,7 @@ pub struct ExecutionContext {
     ssh_multiplexing: bool,
     max_connections: usize,
     display_root: PathBuf,
+    command_label: String,
     trace: TraceSink,
 }
 
@@ -106,6 +142,7 @@ impl ExecutionContext {
         ssh_multiplexing: bool,
         max_connections: usize,
         display_root: PathBuf,
+        command_label: String,
         trace: TraceSink,
     ) -> Self {
         Self {
@@ -114,12 +151,17 @@ impl ExecutionContext {
             ssh_multiplexing,
             max_connections,
             display_root,
+            command_label,
             trace,
         }
     }
 
     pub fn is_dry_run(&self) -> bool {
         self.dry_run
+    }
+
+    pub fn command_label(&self) -> &str {
+        &self.command_label
     }
 
     pub fn git_invocation_options(&self) -> GitInvocationOptions {
@@ -279,6 +321,7 @@ where
     }
 
     let name_width = compute_name_width(repos, ctx.display_root());
+    let max_workers = ctx.max_connections();
     let run_started_at = Instant::now();
     let mut rows: Vec<RepoRow> = repos
         .iter()
@@ -297,13 +340,14 @@ where
     };
     let stdout = stdout.lock();
     let mut printer: Box<dyn Printer + '_> = if is_tty {
-        Box::new(TtyTablePrinter::new(stdout, terminal_columns, name_width))
+        let header = run_header(ctx, repos.len(), max_workers);
+        Box::new(
+            TtyTablePrinter::new(stdout, terminal_columns, name_width).with_header(Some(header)),
+        )
     } else {
         Box::new(PlainPrinter::new(stdout, name_width))
     };
     printer.start(&rows)?;
-
-    let max_workers = ctx.max_connections();
 
     let semaphore = if max_workers > 0 && max_workers < repos.len() {
         Some(Arc::new(Semaphore::new(max_workers)))
@@ -371,18 +415,18 @@ where
         }
         drop(tx);
 
-        for event in rx {
-            match event {
-                RepoEvent::Started { idx } => {
+        loop {
+            match rx.recv_timeout(TICK_INTERVAL) {
+                Ok(RepoEvent::Started { idx }) => {
                     rows[idx].mark_running();
                     let elapsed_ms = run_started_at.elapsed().as_millis();
                     let _ = printer.update_row(&rows, idx, elapsed_ms)?;
                 }
-                RepoEvent::Completed {
+                Ok(RepoEvent::Completed {
                     idx,
                     result,
                     trace_sample,
-                } => {
+                }) => {
                     rows[idx].mark_finished(formatter.format_result(&result));
                     completions[idx] = Some(trace_sample);
                     let elapsed_ms = run_started_at.elapsed().as_millis();
@@ -396,6 +440,13 @@ where
                         &mut summary,
                     )?;
                 }
+                // No repo has changed state yet — redraw so the clock advances.
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let elapsed_ms = run_started_at.elapsed().as_millis();
+                    printer.tick(&rows, elapsed_ms)?;
+                }
+                // All workers have finished and dropped their senders.
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
         Ok(())

@@ -236,7 +236,7 @@ dependencies = [
 
 [[package]]
 name = "git-all"
-version = "0.7.4"
+version = "0.7.5-rc.1"
 dependencies = [
  "anyhow",
  "clap",

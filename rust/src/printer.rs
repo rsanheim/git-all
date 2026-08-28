@@ -109,6 +109,13 @@ pub trait Printer {
         elapsed_ms: u128,
     ) -> io::Result<Vec<usize>>;
     fn complete(&mut self, rows: &[RepoRow], elapsed_ms: u128) -> io::Result<Vec<usize>>;
+
+    /// Redraw live progress without any row-state change (e.g. a clock tick).
+    /// No-op for printers with no live region.
+    fn tick(&mut self, rows: &[RepoRow], elapsed_ms: u128) -> io::Result<()> {
+        let _ = (rows, elapsed_ms);
+        Ok(())
+    }
 }
 
 pub struct PlainPrinter<W: Write> {
@@ -172,11 +179,17 @@ pub struct TtyTablePrinter<W: Write> {
     terminal_columns: usize,
     repo_width: usize,
     next_to_print: usize,
-    footer_active: bool,
+    /// Lines the live footer currently occupies (0 when not drawn). The footer
+    /// grows a line while repos are in flight, so its height varies.
+    footer_height: u16,
+    /// One-time scope line printed above the footer on `start`.
+    header: Option<String>,
 }
 
 impl<W: Write> TtyTablePrinter<W> {
-    const FOOTER_HEIGHT: u16 = 2;
+    /// Max in-flight repo names to list in the footer before collapsing the
+    /// remainder into a "+N more" count.
+    const MAX_RUNNING_NAMES: usize = 6;
 
     pub fn new(writer: W, terminal_columns: usize, repo_width: usize) -> Self {
         Self {
@@ -184,8 +197,15 @@ impl<W: Write> TtyTablePrinter<W> {
             terminal_columns,
             repo_width,
             next_to_print: 0,
-            footer_active: false,
+            footer_height: 0,
+            header: None,
         }
+    }
+
+    /// Set the one-time scope line shown above the footer.
+    pub fn with_header(mut self, header: Option<String>) -> Self {
+        self.header = header;
+        self
     }
 
     fn terminal_width(&self) -> usize {
@@ -227,14 +247,14 @@ impl<W: Write> TtyTablePrinter<W> {
     }
 
     fn clear_footer(&mut self) -> io::Result<()> {
-        if self.footer_active {
+        if self.footer_height > 0 {
             queue!(
                 self.writer,
                 MoveToColumn(0),
-                MoveUp(Self::FOOTER_HEIGHT),
+                MoveUp(self.footer_height),
                 Clear(ClearType::FromCursorDown)
             )?;
-            self.footer_active = false;
+            self.footer_height = 0;
         }
         Ok(())
     }
@@ -243,10 +263,16 @@ impl<W: Write> TtyTablePrinter<W> {
         let mut complete = 0usize;
         let mut running = 0usize;
         let mut pending = 0usize;
+        let mut running_names: Vec<&str> = Vec::new();
         for row in rows {
             match row.state {
                 RowState::Finished => complete += 1,
-                RowState::Running => running += 1,
+                RowState::Running => {
+                    running += 1;
+                    if running_names.len() < Self::MAX_RUNNING_NAMES {
+                        running_names.push(&row.repo);
+                    }
+                }
                 RowState::Pending => pending += 1,
             }
         }
@@ -264,16 +290,32 @@ impl<W: Write> TtyTablePrinter<W> {
             footer.render_message(),
             width = self.repo_width
         );
+
+        let mut height: u16 = 0;
         writeln!(self.writer, "{}", separator)?;
+        height += 1;
         writeln!(self.writer, "{}", self.fit_line(&summary))?;
+        height += 1;
+        if running > 0 {
+            let mut line = format!("running: {}", running_names.join(", "));
+            if running > running_names.len() {
+                line.push_str(&format!(", +{} more", running - running_names.len()));
+            }
+            writeln!(self.writer, "{}", self.fit_line(&line))?;
+            height += 1;
+        }
         self.writer.flush()?;
-        self.footer_active = true;
+        self.footer_height = height;
         Ok(())
     }
 }
 
 impl<W: Write> Printer for TtyTablePrinter<W> {
     fn start(&mut self, rows: &[RepoRow]) -> io::Result<()> {
+        if let Some(header) = self.header.clone() {
+            let line = self.fit_line(&header);
+            writeln!(self.writer, "{}", line)?;
+        }
         self.render_footer(rows, 0)
     }
 
@@ -294,6 +336,11 @@ impl<W: Write> Printer for TtyTablePrinter<W> {
         let printed = self.flush_finished_rows(rows)?;
         self.render_footer(rows, elapsed_ms)?;
         Ok(printed)
+    }
+
+    fn tick(&mut self, rows: &[RepoRow], elapsed_ms: u128) -> io::Result<()> {
+        self.clear_footer()?;
+        self.render_footer(rows, elapsed_ms)
     }
 }
 
@@ -593,10 +640,7 @@ mod tests {
 
             rows[1].mark_finished("clean".to_string());
             let printed = printer.update_row(&rows, 1, 100).expect("tty late finish");
-            assert!(
-                printed.is_empty(),
-                "row 1 must buffer until row 0 finishes"
-            );
+            assert!(printed.is_empty(), "row 1 must buffer until row 0 finishes");
             let mid = strip_ansi_sequences(&output.rendered());
             assert!(
                 !mid.contains("agentic-dev  clean"),
@@ -629,13 +673,98 @@ mod tests {
         }
 
         let rendered = String::from_utf8(output).expect("utf8");
+        // The start footer is 3 lines (separator + summary + running list) while
+        // "activities" is in flight, so the in-place clear moves up by 3.
         assert!(
-            rendered.contains("\x1b[2A"),
-            "expected MoveUp(2) escape; got: {rendered:?}"
+            rendered.contains("\x1b[3A"),
+            "expected MoveUp(3) escape; got: {rendered:?}"
         );
         assert!(
             rendered.contains("\x1b[J") || rendered.contains("\x1b[0J"),
             "expected Clear(FromCursorDown) escape; got: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn tty_table_printer_prints_header_once_above_the_footer() {
+        let rows = vec![RepoRow::pending("activities".to_string())];
+        let mut output = Vec::new();
+
+        {
+            let mut printer = TtyTablePrinter::new(&mut output, 80, 14).with_header(Some(
+                "git-all fetch · 1 repo · ~/work · 8 workers".to_string(),
+            ));
+            printer.start(&rows).expect("tty start");
+        }
+
+        let stripped = strip_ansi_sequences(&String::from_utf8(output).expect("utf8"));
+        assert!(stripped.contains("git-all fetch · 1 repo · ~/work · 8 workers"));
+        assert!(stripped.contains("SUMMARY"));
+        // Header sits above the footer.
+        let header_pos = stripped.find("git-all fetch").expect("header printed");
+        let summary_pos = stripped.find("SUMMARY").expect("summary printed");
+        assert!(header_pos < summary_pos);
+    }
+
+    #[test]
+    fn tty_table_printer_footer_lists_in_flight_repos() {
+        let rows = vec![
+            RepoRow::running("activities".to_string()),
+            RepoRow::pending("agentic-dev".to_string()),
+        ];
+        let mut output = Vec::new();
+
+        {
+            let mut printer = TtyTablePrinter::new(&mut output, 80, 14);
+            printer.start(&rows).expect("tty start");
+        }
+
+        let stripped = strip_ansi_sequences(&String::from_utf8(output).expect("utf8"));
+        assert!(stripped.contains("running: activities"));
+        assert!(stripped.contains("0 of 2 done | 1 running | 1 pending"));
+    }
+
+    #[test]
+    fn tty_table_printer_running_line_caps_names_and_counts_the_rest() {
+        let rows: Vec<RepoRow> = (0..10)
+            .map(|i| RepoRow::running(format!("repo-{i:02}")))
+            .collect();
+        let mut output = Vec::new();
+
+        {
+            // Wide terminal so the running line is not truncated.
+            let mut printer = TtyTablePrinter::new(&mut output, 200, 14);
+            printer.start(&rows).expect("tty start");
+        }
+
+        let stripped = strip_ansi_sequences(&String::from_utf8(output).expect("utf8"));
+        // Six names shown, remaining four summarized.
+        assert!(stripped.contains("repo-05"));
+        assert!(!stripped.contains("repo-06"));
+        assert!(stripped.contains("+4 more"));
+    }
+
+    #[test]
+    fn tty_table_printer_tick_redraws_footer_with_updated_elapsed() {
+        let rows = vec![RepoRow::running("activities".to_string())];
+        let mut output = Vec::new();
+
+        {
+            let mut printer = TtyTablePrinter::new(&mut output, 80, 14);
+            printer.start(&rows).expect("tty start");
+            printer.tick(&rows, 2500).expect("tty tick");
+        }
+
+        let rendered = String::from_utf8(output).expect("utf8");
+        let stripped = strip_ansi_sequences(&rendered);
+        assert!(
+            stripped.contains("2.5s"),
+            "tick should show new elapsed time"
+        );
+        // A tick clears the previous footer in place before redrawing it.
+        assert!(
+            rendered.contains("\x1b[3A"),
+            "tick should move up over the footer"
         );
     }
 
