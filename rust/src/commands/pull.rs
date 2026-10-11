@@ -21,7 +21,10 @@ impl OutputFormatter for PullFormatter {
         }
 
         // Try to extract summary from stdout (e.g., "3 files changed, 10 insertions(+), 5 deletions(-)")
-        if let Some(summary_line) = stdout.lines().find(|l| l.contains("files changed")) {
+        if let Some(summary_line) = stdout
+            .lines()
+            .find(|l| l.contains("file changed") || l.contains("files changed"))
+        {
             return summary_line.trim().to_string();
         }
 
@@ -57,4 +60,37 @@ pub fn run(ctx: &mut ExecutionContext, repos: &[PathBuf], extra_args: &[String])
         },
         &formatter,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+
+    fn make_output(stdout: &str) -> Output {
+        Output {
+            status: ExitStatus::from_raw(0),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_single_file_fast_forward_shows_summary() {
+        let stdout = "Updating 02ed788..ccd5545\nFast-forward\n f.txt | 1 +\n 1 file changed, 1 insertion(+)\n";
+        assert_eq!(
+            PullFormatter.format(&make_output(stdout)),
+            "1 file changed, 1 insertion(+)"
+        );
+    }
+
+    #[test]
+    fn test_multiple_files_fast_forward_shows_summary() {
+        let stdout = "Updating 02ed788..ccd5545\nFast-forward\n a.txt | 1 +\n b.txt | 1 -\n 2 files changed, 1 insertion(+), 1 deletion(-)\n";
+        assert_eq!(
+            PullFormatter.format(&make_output(stdout)),
+            "2 files changed, 1 insertion(+), 1 deletion(-)"
+        );
+    }
 }
