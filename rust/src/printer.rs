@@ -38,6 +38,7 @@ pub struct RepoRow {
     pub repo: String,
     pub output: String,
     pub state: RowState,
+    started_ms: Option<u128>,
 }
 
 impl RepoRow {
@@ -47,6 +48,7 @@ impl RepoRow {
             repo,
             output: "pending".to_string(),
             state: RowState::Pending,
+            started_ms: None,
         }
     }
 
@@ -56,6 +58,7 @@ impl RepoRow {
             repo,
             output: "running".to_string(),
             state: RowState::Running,
+            started_ms: Some(0),
         }
     }
 
@@ -65,17 +68,20 @@ impl RepoRow {
             repo,
             output,
             state: RowState::Finished,
+            started_ms: None,
         }
     }
 
-    pub fn mark_running(&mut self) {
+    pub fn mark_running(&mut self, elapsed_ms: u128) {
         self.output = "running".to_string();
         self.state = RowState::Running;
+        self.started_ms = Some(elapsed_ms);
     }
 
     pub fn mark_finished(&mut self, output: String) {
         self.output = output;
         self.state = RowState::Finished;
+        self.started_ms = None;
     }
 }
 
@@ -109,6 +115,11 @@ pub trait Printer {
         elapsed_ms: u128,
     ) -> io::Result<Vec<usize>>;
     fn complete(&mut self, rows: &[RepoRow], elapsed_ms: u128) -> io::Result<Vec<usize>>;
+
+    /// Refresh live progress even when no process has started or finished.
+    fn tick(&mut self, _rows: &[RepoRow], _elapsed_ms: u128) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 pub struct PlainPrinter<W: Write> {
@@ -257,14 +268,35 @@ impl<W: Write> TtyTablePrinter<W> {
             pending,
             elapsed_ms,
         };
-        let separator = "-".repeat(self.terminal_width());
         let summary = format!(
             "{:<width$}  {}",
             "SUMMARY",
             footer.render_message(),
             width = self.repo_width
         );
-        writeln!(self.writer, "{}", separator)?;
+        let progress = if let Some(row) = rows.get(self.next_to_print) {
+            let state = match row.started_ms {
+                Some(started_ms) => format!(
+                    "running {:.1}s",
+                    elapsed_ms.saturating_sub(started_ms) as f64 / 1000.0
+                ),
+                None => "pending".to_string(),
+            };
+            let prefix = "WAITING ";
+            let suffix = format!(" | {}", state);
+            let name_width = self
+                .terminal_width()
+                .saturating_sub(prefix.len() + suffix.len());
+            format!(
+                "{}{}{}",
+                prefix,
+                display_repo_name(&row.repo, name_width),
+                suffix
+            )
+        } else {
+            "-".repeat(self.terminal_width())
+        };
+        writeln!(self.writer, "{}", self.fit_line(&progress))?;
         writeln!(self.writer, "{}", self.fit_line(&summary))?;
         self.writer.flush()?;
         self.footer_active = true;
@@ -294,6 +326,11 @@ impl<W: Write> Printer for TtyTablePrinter<W> {
         let printed = self.flush_finished_rows(rows)?;
         self.render_footer(rows, elapsed_ms)?;
         Ok(printed)
+    }
+
+    fn tick(&mut self, rows: &[RepoRow], elapsed_ms: u128) -> io::Result<()> {
+        self.clear_footer()?;
+        self.render_footer(rows, elapsed_ms)
     }
 }
 
@@ -531,7 +568,7 @@ mod tests {
     }
 
     #[test]
-    fn tty_table_printer_start_writes_only_the_footer() {
+    fn tty_table_printer_start_writes_only_live_progress() {
         let rows = vec![
             RepoRow::pending("activities".to_string()),
             RepoRow::pending("agentic-dev".to_string()),
@@ -545,10 +582,8 @@ mod tests {
 
         let rendered = String::from_utf8(output).expect("utf8");
         let stripped = strip_ansi_sequences(&rendered);
-        assert!(
-            !stripped.contains("activities"),
-            "no rows should be printed yet, got: {stripped:?}"
-        );
+        assert!(!stripped.contains("[activities"));
+        assert!(stripped.contains("WAITING activities | pending"));
         assert!(stripped.contains("SUMMARY"));
         assert!(stripped.contains("0 of 2 done"));
         assert!(stripped.contains("2 pending"));
@@ -593,10 +628,7 @@ mod tests {
 
             rows[1].mark_finished("clean".to_string());
             let printed = printer.update_row(&rows, 1, 100).expect("tty late finish");
-            assert!(
-                printed.is_empty(),
-                "row 1 must buffer until row 0 finishes"
-            );
+            assert!(printed.is_empty(), "row 1 must buffer until row 0 finishes");
             let mid = strip_ansi_sequences(&output.rendered());
             assert!(
                 !mid.contains("agentic-dev  clean"),
@@ -697,5 +729,67 @@ mod tests {
         assert!(stripped.contains("agentic-dev"));
         assert!(stripped.contains("2 of 2 done"));
         assert!(stripped.contains("1.5s"));
+    }
+
+    #[test]
+    fn tty_tick_advances_blocking_repo_runtime_without_flushing_later_results() {
+        let output = SharedBuffer::default();
+        let mut rows = vec![
+            RepoRow::pending("repo-053".to_string()),
+            RepoRow::finished("repo-054".to_string(), "clean".to_string()),
+        ];
+        rows[0].mark_running(2000);
+        let mut printer = TtyTablePrinter::new(output.clone(), 60, 8);
+
+        printer.start(&rows).expect("tty start");
+        printer.tick(&rows, 17_000).expect("first quiet tick");
+        let rendered = strip_ansi_sequences(&output.rendered());
+        assert!(rendered.contains("WAITING repo-053 | running 15.0s\n"));
+        assert!(rendered.contains("1 of 2 done"));
+        assert!(!rendered.contains("[repo-054"));
+
+        printer.tick(&rows, 32_000).expect("second quiet tick");
+        let rendered = strip_ansi_sequences(&output.rendered());
+        assert!(rendered.contains("WAITING repo-053 | running 30.0s"));
+        assert!(!rendered.contains("[repo-054"));
+
+        rows[0].mark_finished("clean".to_string());
+        assert_eq!(printer.update_row(&rows, 0, 32_100).unwrap(), vec![0, 1]);
+        let rendered = strip_ansi_sequences(&output.rendered());
+        assert!(rendered.ends_with("2 of 2 done | 0 running | 0 pending | 32.1s\n"));
+        assert_eq!(rendered.matches("[repo-053").count(), 1);
+        assert_eq!(rendered.matches("[repo-054").count(), 1);
+    }
+
+    #[test]
+    fn tty_blocking_repo_runtime_remains_visible_with_long_name_at_60_columns() {
+        let mut rows = vec![RepoRow::pending(
+            "a-repository-with-an-extremely-long-name-that-is-still-running".to_string(),
+        )];
+        rows[0].mark_running(500);
+        let output = SharedBuffer::default();
+        let mut printer = TtyTablePrinter::new(output.clone(), 60, 48);
+
+        printer.tick(&rows, 30_500).expect("quiet tick");
+
+        let rendered = strip_ansi_sequences(&output.rendered());
+        let waiting = rendered
+            .lines()
+            .find(|line| line.starts_with("WAITING"))
+            .unwrap();
+        assert!(waiting.ends_with(" | running 30.0s"), "{waiting}");
+        assert!(waiting.len() <= 60, "{waiting}");
+    }
+
+    #[test]
+    fn plain_tick_does_not_produce_progress_output() {
+        let mut output = Vec::new();
+        let rows = vec![RepoRow::running("repo-053".to_string())];
+        let mut printer = PlainPrinter::new(&mut output, 8);
+
+        printer.start(&rows).expect("plain start");
+        printer.tick(&rows, 30_000).expect("plain tick");
+
+        assert!(output.is_empty());
     }
 }
