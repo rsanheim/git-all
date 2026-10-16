@@ -25,6 +25,21 @@ fn trace_reports_ordered_wait_for_blocked_repos() {
         3,
         "expected one output line per repo: {stdout}"
     );
+    let printed_repos: Vec<_> = stdout
+        .lines()
+        .map(|line| {
+            line.split_once(']')
+                .expect("repo name in output")
+                .0
+                .trim_start_matches('[')
+                .trim()
+        })
+        .collect();
+    assert_eq!(printed_repos, ["a", "b", "c"], "piped rows stay sorted");
+    assert!(
+        !stdout.contains('\u{1b}'),
+        "piped output has no ANSI escapes"
+    );
     assert!(
         stderr.contains("git-all-trace phase=scan"),
         "expected scan trace output: {stderr}"

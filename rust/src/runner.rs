@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::printer::{PlainPrinter, Printer, RepoRow, TtyTablePrinter};
 use crate::repo::repo_display_name;
@@ -47,6 +47,7 @@ impl Semaphore {
 
 const MIN_REPO_NAME_WIDTH: usize = 4;
 const MAX_REPO_NAME_WIDTH_CAP: usize = 48;
+const TTY_TICK_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Trace sample for a completed repo (`None` when `GIT_ALL_TRACE` is off).
 type RepoCompletion = Option<RepoTraceSample>;
@@ -54,6 +55,7 @@ type RepoCompletion = Option<RepoTraceSample>;
 enum RepoEvent {
     Started {
         idx: usize,
+        started_ms: u128,
     },
     Completed {
         idx: usize,
@@ -253,7 +255,7 @@ fn emit_traces_for_printed_rows(
 /// Repos are pre-sorted alphabetically. The runner emits `Completed` for every
 /// repo; when output is a TTY it also emits `Started` so the live table can show
 /// running state. Printers decide how to render:
-/// - TTY output updates rows in place immediately as repos start and finish
+/// - TTY output keeps a live footer while printing final rows alphabetically
 /// - non-TTY output prints only final rows, preserving alphabetical order
 ///
 /// Uses a thread-per-process pattern with `wait_with_output()`, which is
@@ -327,7 +329,10 @@ where
                     sem.acquire();
                 }
                 if is_tty {
-                    let _ = tx.send(RepoEvent::Started { idx });
+                    let _ = tx.send(RepoEvent::Started {
+                        idx,
+                        started_ms: run_started_at.elapsed().as_millis(),
+                    });
                 }
 
                 let start_ms = run_started_at.elapsed().as_millis();
@@ -371,18 +376,25 @@ where
         }
         drop(tx);
 
-        for event in rx {
+        loop {
+            // A quiet child must not stop the live clock. Plain output keeps
+            // blocking without periodic wakeups or additional output.
+            let event = if is_tty {
+                rx.recv_timeout(TTY_TICK_INTERVAL)
+            } else {
+                rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+            };
             match event {
-                RepoEvent::Started { idx } => {
-                    rows[idx].mark_running();
+                Ok(RepoEvent::Started { idx, started_ms }) => {
+                    rows[idx].mark_running(started_ms);
                     let elapsed_ms = run_started_at.elapsed().as_millis();
                     let _ = printer.update_row(&rows, idx, elapsed_ms)?;
                 }
-                RepoEvent::Completed {
+                Ok(RepoEvent::Completed {
                     idx,
                     result,
                     trace_sample,
-                } => {
+                }) => {
                     rows[idx].mark_finished(formatter.format_result(&result));
                     completions[idx] = Some(trace_sample);
                     let elapsed_ms = run_started_at.elapsed().as_millis();
@@ -396,6 +408,10 @@ where
                         &mut summary,
                     )?;
                 }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    printer.tick(&rows, run_started_at.elapsed().as_millis())?;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
         Ok(())
