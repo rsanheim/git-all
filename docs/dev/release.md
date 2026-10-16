@@ -45,6 +45,9 @@ This will:
 
 ### 2. Update Homebrew Tap
 
+The formula uses concrete versioned URLs and lets Homebrew infer the version.
+The updater refreshes those URLs and all four SHA256 hashes.
+
 After GitHub Actions completes (~5 min):
 
 ```bash

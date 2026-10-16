@@ -28,14 +28,6 @@ Examples:
 EOF
 }
 
-run() {
-    if $DRY_RUN; then
-        echo "[dry-run] $*"
-    else
-        "$@"
-    fi
-}
-
 main() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -112,17 +104,23 @@ main() {
     fi
 
     echo "Updating formula..."
-    run sed -i '' "s/version \".*\"/version \"${VERSION}\"/" "$FORMULA"
 
-    # Update SHA256 hashes using awk (portable, unlike GNU sed's 0,/pattern/)
+    # Homebrew infers the version from concrete URLs; an explicit version is redundant.
     if $DRY_RUN; then
-        echo "[dry-run] awk (update sha256 hashes) $FORMULA"
+        echo "[dry-run] awk (update versioned URLs and sha256 hashes) $FORMULA"
     else
         awk \
+            -v version="$VERSION" \
             -v darwin_arm64="$DARWIN_ARM64_SHA" \
             -v darwin_x86="$DARWIN_X86_64_SHA" \
             -v linux_arm64="$LINUX_ARM64_SHA" \
             -v linux_x86="$LINUX_X86_64_SHA" '
+            /^[[:space:]]*version "/ { next }
+            /^[[:space:]]*url "/ {
+                sub(/\/download\/[^\/]+\//, "/download/v" version "/")
+                sub(/git-all-.*-darwin-/, "git-all-" version "-darwin-")
+                sub(/git-all-.*-linux-/, "git-all-" version "-linux-")
+            }
             /darwin-arm64/ { platform = "darwin_arm64" }
             /darwin-x86_64/ { platform = "darwin_x86" }
             /linux-arm64/ { platform = "linux_arm64" }
@@ -135,7 +133,8 @@ main() {
                 platform = ""
             }
             { print }
-        ' "$FORMULA" > "${FORMULA}.tmp" && mv "${FORMULA}.tmp" "$FORMULA"
+        ' "$FORMULA" > "${FORMULA}.tmp"
+        mv "${FORMULA}.tmp" "$FORMULA"
     fi
 
     echo ""
