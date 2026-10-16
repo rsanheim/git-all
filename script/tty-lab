@@ -100,6 +100,9 @@ if [[ -z "$bin" ]]; then
     exit 1
   fi
 fi
+if [[ "$bin" != /* ]]; then
+  bin="$PWD/$bin"
+fi
 [[ -x "$bin" ]] || { echo "tty-lab: not executable: $bin" >&2; exit 1; }
 
 real_git="$(command -v git)"
@@ -222,4 +225,4 @@ echo "  git-all status            git-all -n 4 fetch"
 echo "  git-all fetch | head      (piped = non-TTY, plain output)"
 echo "type 'exit' to tear down the workspace."
 EOF
-exec bash --rcfile "$rc" -i
+bash --rcfile "$rc" -i
