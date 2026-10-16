@@ -47,6 +47,7 @@ impl Semaphore {
 
 const MIN_REPO_NAME_WIDTH: usize = 4;
 const MAX_REPO_NAME_WIDTH_CAP: usize = 48;
+const TTY_TICK_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Trace sample for a completed repo (`None` when `GIT_ALL_TRACE` is off).
 type RepoCompletion = Option<RepoTraceSample>;
@@ -379,7 +380,7 @@ where
             // A quiet child must not stop the live clock. Plain output keeps
             // blocking without periodic wakeups or additional output.
             let event = if is_tty {
-                rx.recv_timeout(Duration::from_millis(250))
+                rx.recv_timeout(TTY_TICK_INTERVAL)
             } else {
                 rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
             };
