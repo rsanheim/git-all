@@ -56,7 +56,6 @@ type RepoCompletion = Option<RepoTraceSample>;
 enum RepoEvent {
     Started {
         idx: usize,
-        started_ms: u128,
     },
     Completed {
         idx: usize,
@@ -331,10 +330,7 @@ where
                     sem.acquire();
                 }
                 if is_tty {
-                    let _ = tx.send(RepoEvent::Started {
-                        idx,
-                        started_ms: run_started_at.elapsed().as_millis(),
-                    });
+                    let _ = tx.send(RepoEvent::Started { idx });
                 }
 
                 let start_ms = run_started_at.elapsed().as_millis();
@@ -387,8 +383,8 @@ where
                 rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
             };
             match event {
-                Ok(RepoEvent::Started { idx, started_ms }) => {
-                    rows[idx].mark_running(started_ms);
+                Ok(RepoEvent::Started { idx }) => {
+                    rows[idx].mark_running();
                     let elapsed_ms = run_started_at.elapsed().as_millis();
                     let _ = printer.update_row(&rows, idx, elapsed_ms)?;
                 }

@@ -73,7 +73,6 @@ pub struct RepoRow {
     pub repo: String,
     pub output: String,
     pub state: RowState,
-    started_ms: Option<u128>,
 }
 
 impl RepoRow {
@@ -83,7 +82,6 @@ impl RepoRow {
             repo,
             output: "pending".to_string(),
             state: RowState::Pending,
-            started_ms: None,
         }
     }
 
@@ -93,7 +91,6 @@ impl RepoRow {
             repo,
             output: "running".to_string(),
             state: RowState::Running,
-            started_ms: Some(0),
         }
     }
 
@@ -103,20 +100,17 @@ impl RepoRow {
             repo,
             output,
             state: RowState::Finished,
-            started_ms: None,
         }
     }
 
-    pub fn mark_running(&mut self, elapsed_ms: u128) {
+    pub fn mark_running(&mut self) {
         self.output = "running".to_string();
         self.state = RowState::Running;
-        self.started_ms = Some(elapsed_ms);
     }
 
     pub fn mark_finished(&mut self, output: String) {
         self.output = output;
         self.state = RowState::Finished;
-        self.started_ms = None;
     }
 }
 
@@ -764,7 +758,7 @@ mod tests {
             RepoRow::pending("repo-053".to_string()),
             RepoRow::finished("repo-054".to_string(), "clean".to_string()),
         ];
-        rows[0].mark_running(2000);
+        rows[0].mark_running();
         let mut printer = TtyTablePrinter::new(output.clone(), 60, 8);
 
         printer.start(&rows).expect("tty start");
@@ -789,11 +783,11 @@ mod tests {
     }
 
     #[test]
-    fn tty_blocking_repo_runtime_remains_visible_with_long_name_at_60_columns() {
+    fn tty_footer_truncates_long_running_repo_label_at_60_columns() {
         let mut rows = vec![RepoRow::pending(
             "a-repository-with-an-extremely-long-name-that-is-still-running".to_string(),
         )];
-        rows[0].mark_running(500);
+        rows[0].mark_running();
         let output = SharedBuffer::default();
         let mut printer = TtyTablePrinter::new(output.clone(), 60, 48);
 
@@ -832,9 +826,9 @@ mod tests {
             RepoRow::pending("beta".to_string()),
             RepoRow::pending("gamma".to_string()),
         ];
-        rows[2].mark_running(0);
-        rows[1].mark_running(500);
-        rows[0].mark_running(900);
+        rows[2].mark_running();
+        rows[1].mark_running();
+        rows[0].mark_running();
         let output = SharedBuffer::default();
         let mut printer = TtyTablePrinter::new(output.clone(), 80, 30);
 
