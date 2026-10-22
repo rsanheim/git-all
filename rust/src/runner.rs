@@ -46,6 +46,7 @@ impl Semaphore {
 }
 
 const MIN_REPO_NAME_WIDTH: usize = 4;
+const REPO_NAME_PADDING: usize = 5;
 const MAX_REPO_NAME_WIDTH_CAP: usize = 48;
 const TTY_TICK_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -79,6 +80,7 @@ fn compute_name_width(repos: &[PathBuf], display_root: &Path) -> usize {
         let name = repo_display_name(repo, display_root);
         max_len = max_len.max(name.len());
     }
+    max_len += REPO_NAME_PADDING;
 
     let capped = max_len.min(MAX_REPO_NAME_WIDTH_CAP);
     capped.max(MIN_REPO_NAME_WIDTH)
@@ -490,7 +492,7 @@ mod tests {
 
         let tiny = vec![root.join("a")];
         let tiny_width = compute_name_width(&tiny, &root);
-        assert_eq!(tiny_width, MIN_REPO_NAME_WIDTH);
+        assert_eq!(tiny_width, 1 + REPO_NAME_PADDING);
     }
 
     /// Test that large output (>64KB) doesn't cause pipe buffer deadlock.
