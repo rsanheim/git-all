@@ -46,6 +46,7 @@ impl Semaphore {
 }
 
 const MIN_REPO_NAME_WIDTH: usize = 4;
+const REPO_NAME_PADDING: usize = 5;
 const MAX_REPO_NAME_WIDTH_CAP: usize = 48;
 const TTY_TICK_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -55,7 +56,6 @@ type RepoCompletion = Option<RepoTraceSample>;
 enum RepoEvent {
     Started {
         idx: usize,
-        started_ms: u128,
     },
     Completed {
         idx: usize,
@@ -79,6 +79,7 @@ fn compute_name_width(repos: &[PathBuf], display_root: &Path) -> usize {
         let name = repo_display_name(repo, display_root);
         max_len = max_len.max(name.len());
     }
+    max_len += REPO_NAME_PADDING;
 
     let capped = max_len.min(MAX_REPO_NAME_WIDTH_CAP);
     capped.max(MIN_REPO_NAME_WIDTH)
@@ -329,10 +330,7 @@ where
                     sem.acquire();
                 }
                 if is_tty {
-                    let _ = tx.send(RepoEvent::Started {
-                        idx,
-                        started_ms: run_started_at.elapsed().as_millis(),
-                    });
+                    let _ = tx.send(RepoEvent::Started { idx });
                 }
 
                 let start_ms = run_started_at.elapsed().as_millis();
@@ -385,8 +383,8 @@ where
                 rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
             };
             match event {
-                Ok(RepoEvent::Started { idx, started_ms }) => {
-                    rows[idx].mark_running(started_ms);
+                Ok(RepoEvent::Started { idx }) => {
+                    rows[idx].mark_running();
                     let elapsed_ms = run_started_at.elapsed().as_millis();
                     let _ = printer.update_row(&rows, idx, elapsed_ms)?;
                 }
@@ -490,7 +488,7 @@ mod tests {
 
         let tiny = vec![root.join("a")];
         let tiny_width = compute_name_width(&tiny, &root);
-        assert_eq!(tiny_width, MIN_REPO_NAME_WIDTH);
+        assert_eq!(tiny_width, 1 + REPO_NAME_PADDING);
     }
 
     /// Test that large output (>64KB) doesn't cause pipe buffer deadlock.

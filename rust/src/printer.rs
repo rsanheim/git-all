@@ -26,6 +26,41 @@ pub(crate) fn format_repo_name(name: &str, width: usize) -> String {
     )
 }
 
+/// Names of in-progress repos for the footer label, fitted to `width`.
+/// A single repo reads "name in-progress"; several are comma-joined with a
+/// trailing " ..." when not all of them fit.
+fn in_progress_label(names: &[&str], width: usize) -> String {
+    if let [only] = names {
+        let label = format!("{only} in-progress");
+        return if label.len() <= width {
+            label
+        } else {
+            display_repo_name(only, width)
+        };
+    }
+    let mut label = String::new();
+    let mut shown = 0;
+    for (i, name) in names.iter().enumerate() {
+        let sep = if i == 0 { "" } else { ", " };
+        let more = if i + 1 < names.len() { " ..." } else { "" };
+        if label.len() + sep.len() + name.len() + more.len() > width {
+            break;
+        }
+        label.push_str(sep);
+        label.push_str(name);
+        shown += 1;
+    }
+    if shown < names.len() {
+        if label.is_empty() {
+            label = names[0].chars().take(width.saturating_sub(4)).collect();
+        }
+        label.push_str(" ...");
+    }
+    let end = label.floor_char_boundary(width);
+    label.truncate(end);
+    label
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RowState {
     Pending,
@@ -38,7 +73,6 @@ pub struct RepoRow {
     pub repo: String,
     pub output: String,
     pub state: RowState,
-    started_ms: Option<u128>,
 }
 
 impl RepoRow {
@@ -48,7 +82,6 @@ impl RepoRow {
             repo,
             output: "pending".to_string(),
             state: RowState::Pending,
-            started_ms: None,
         }
     }
 
@@ -58,7 +91,6 @@ impl RepoRow {
             repo,
             output: "running".to_string(),
             state: RowState::Running,
-            started_ms: Some(0),
         }
     }
 
@@ -68,20 +100,17 @@ impl RepoRow {
             repo,
             output,
             state: RowState::Finished,
-            started_ms: None,
         }
     }
 
-    pub fn mark_running(&mut self, elapsed_ms: u128) {
+    pub fn mark_running(&mut self) {
         self.output = "running".to_string();
         self.state = RowState::Running;
-        self.started_ms = Some(elapsed_ms);
     }
 
     pub fn mark_finished(&mut self, output: String) {
         self.output = output;
         self.state = RowState::Finished;
-        self.started_ms = None;
     }
 }
 
@@ -268,34 +297,28 @@ impl<W: Write> TtyTablePrinter<W> {
             pending,
             elapsed_ms,
         };
-        let summary = format!(
-            "{:<width$}  {}",
-            "SUMMARY",
-            footer.render_message(),
-            width = self.repo_width
-        );
-        let progress = if let Some(row) = rows.get(self.next_to_print) {
-            let state = match row.started_ms {
-                Some(started_ms) => format!(
-                    "running {:.1}s",
-                    elapsed_ms.saturating_sub(started_ms) as f64 / 1000.0
-                ),
-                None => "pending".to_string(),
-            };
-            let prefix = "WAITING ";
-            let suffix = format!(" | {}", state);
-            let name_width = self
-                .terminal_width()
-                .saturating_sub(prefix.len() + suffix.len());
-            format!(
-                "{}{}{}",
-                prefix,
-                display_repo_name(&row.repo, name_width),
-                suffix
-            )
+        let label = if self.next_to_print == rows.len() {
+            "done".to_string()
         } else {
-            "-".repeat(self.terminal_width())
+            // Row order keeps the repo blocking output first in the label.
+            let names_in = |state: RowState| -> Vec<&str> {
+                rows.iter()
+                    .filter(|row| row.state == state)
+                    .map(|row| row.repo.as_str())
+                    .collect()
+            };
+            let mut names = names_in(RowState::Running);
+            if names.is_empty() {
+                names = names_in(RowState::Pending);
+            }
+            in_progress_label(&names, self.repo_width)
         };
+        let summary = format!(
+            "{} {}",
+            format_repo_name(&label, self.repo_width),
+            footer.render_message()
+        );
+        let progress = "-".repeat(self.terminal_width());
         writeln!(self.writer, "{}", self.fit_line(&progress))?;
         writeln!(self.writer, "{}", self.fit_line(&summary))?;
         self.writer.flush()?;
@@ -505,8 +528,7 @@ mod tests {
         }
 
         let stripped = strip_ansi_sequences(&String::from_utf8(output).expect("utf8"));
-        assert!(stripped.contains("SUMMARY"));
-        assert!(stripped.contains("1 of 1 done"));
+        assert!(stripped.contains("[done          ] 1 of 1 done"));
         assert!(stripped.contains("1.2s"));
         assert!(stripped.contains("----"));
     }
@@ -564,7 +586,7 @@ mod tests {
                 "0-width terminal should fall back to the default width"
             );
         }
-        assert!(stripped.contains("SUMMARY"), "footer must not be truncated");
+        assert!(stripped.contains("[done"), "footer must not be truncated");
     }
 
     #[test]
@@ -582,10 +604,8 @@ mod tests {
 
         let rendered = String::from_utf8(output).expect("utf8");
         let stripped = strip_ansi_sequences(&rendered);
-        assert!(!stripped.contains("[activities"));
-        assert!(stripped.contains("WAITING activities | pending"));
-        assert!(stripped.contains("SUMMARY"));
-        assert!(stripped.contains("0 of 2 done"));
+        assert_eq!(stripped.lines().count(), 2, "only the footer: {stripped:?}");
+        assert!(stripped.contains("[activities ...] 0 of 2 done"));
         assert!(stripped.contains("2 pending"));
     }
 
@@ -738,47 +758,85 @@ mod tests {
             RepoRow::pending("repo-053".to_string()),
             RepoRow::finished("repo-054".to_string(), "clean".to_string()),
         ];
-        rows[0].mark_running(2000);
+        rows[0].mark_running();
         let mut printer = TtyTablePrinter::new(output.clone(), 60, 8);
 
         printer.start(&rows).expect("tty start");
         printer.tick(&rows, 17_000).expect("first quiet tick");
         let rendered = strip_ansi_sequences(&output.rendered());
-        assert!(rendered.contains("WAITING repo-053 | running 15.0s\n"));
-        assert!(rendered.contains("1 of 2 done"));
+        assert!(
+            rendered.contains("--------\n[repo-053] 1 of 2 done | 1 running | 0 pending | 17.0s\n")
+        );
         assert!(!rendered.contains("[repo-054"));
 
         printer.tick(&rows, 32_000).expect("second quiet tick");
         let rendered = strip_ansi_sequences(&output.rendered());
-        assert!(rendered.contains("WAITING repo-053 | running 30.0s"));
+        assert!(rendered.contains("[repo-053] 1 of 2 done | 1 running | 0 pending | 32.0s"));
         assert!(!rendered.contains("[repo-054"));
 
         rows[0].mark_finished("clean".to_string());
         assert_eq!(printer.update_row(&rows, 0, 32_100).unwrap(), vec![0, 1]);
         let rendered = strip_ansi_sequences(&output.rendered());
-        assert!(rendered.ends_with("2 of 2 done | 0 running | 0 pending | 32.1s\n"));
-        assert_eq!(rendered.matches("[repo-053").count(), 1);
-        assert_eq!(rendered.matches("[repo-054").count(), 1);
+        assert!(rendered.ends_with("[done    ] 2 of 2 done | 0 running | 0 pending | 32.1s\n"));
+        assert_eq!(rendered.matches("[repo-053] clean").count(), 1);
+        assert_eq!(rendered.matches("[repo-054] clean").count(), 1);
     }
 
     #[test]
-    fn tty_blocking_repo_runtime_remains_visible_with_long_name_at_60_columns() {
+    fn tty_footer_truncates_long_running_repo_label_at_60_columns() {
         let mut rows = vec![RepoRow::pending(
             "a-repository-with-an-extremely-long-name-that-is-still-running".to_string(),
         )];
-        rows[0].mark_running(500);
+        rows[0].mark_running();
         let output = SharedBuffer::default();
         let mut printer = TtyTablePrinter::new(output.clone(), 60, 48);
 
         printer.tick(&rows, 30_500).expect("quiet tick");
 
         let rendered = strip_ansi_sequences(&output.rendered());
-        let waiting = rendered
-            .lines()
-            .find(|line| line.starts_with("WAITING"))
-            .unwrap();
-        assert!(waiting.ends_with(" | running 30.0s"), "{waiting}");
-        assert!(waiting.len() <= 60, "{waiting}");
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert_eq!(lines[0], "-".repeat(60));
+        assert!(
+            lines[1].starts_with("[a-repository-with-an-extremely-long-name-tha-...] 0 of 1"),
+            "{}",
+            lines[1]
+        );
+        assert!(lines[1].len() <= 60, "{}", lines[1]);
+    }
+
+    #[test]
+    fn in_progress_label_fits_names_and_marks_overflow() {
+        assert_eq!(in_progress_label(&["foo"], 20), "foo in-progress");
+        assert_eq!(in_progress_label(&["foo"], 10), "foo");
+        assert_eq!(in_progress_label(&["a", "b", "c"], 20), "a, b, c");
+        assert_eq!(
+            in_progress_label(&["cadburyeggs", "foo-b", "foo-c", "foo-d"], 29),
+            "cadburyeggs, foo-b, foo-c ..."
+        );
+        assert_eq!(in_progress_label(&["abcdefghij", "b"], 8), "abcd ...");
+        assert_eq!(in_progress_label(&["abcdefghij", "b"], 8).len(), 8);
+        assert_eq!(in_progress_label(&["abcdefghij", "b"], 3), " ..");
+        assert_eq!(in_progress_label(&[], 8), "");
+    }
+
+    #[test]
+    fn tty_footer_lists_running_repos_in_row_order() {
+        let mut rows = vec![
+            RepoRow::pending("alpha".to_string()),
+            RepoRow::pending("beta".to_string()),
+            RepoRow::pending("gamma".to_string()),
+        ];
+        rows[2].mark_running();
+        rows[1].mark_running();
+        rows[0].mark_running();
+        let output = SharedBuffer::default();
+        let mut printer = TtyTablePrinter::new(output.clone(), 80, 30);
+
+        printer.tick(&rows, 1_000).expect("tick");
+
+        let rendered = strip_ansi_sequences(&output.rendered());
+        let expected = format!("{} 0 of 3 done", format_repo_name("alpha, beta, gamma", 30));
+        assert!(rendered.contains(&expected), "{rendered}");
     }
 
     #[test]
