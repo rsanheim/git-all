@@ -112,7 +112,7 @@ ws="$lab/ws"
 shim="$lab/shim"
 mkdir -p "$ws" "$shim"
 
-cleanup() { [[ "$keep" == 1 ]] || rm -r "$lab" 2>/dev/null || true; }
+cleanup() { [[ "$keep" == 1 ]] || rm -r "$lab" < /dev/null; }
 trap cleanup EXIT
 
 # A spread of alphabetically-distributed names; synthesized past the list end.
