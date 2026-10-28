@@ -7,20 +7,12 @@ VERSION=""
 
 show_help() {
     cat <<EOF
-release - Release a new version of git-all
+Usage: script/release [--dry-run] <X.Y.Z>
 
-Usage: release [options] <version>
+Push a release tag. GitHub Actions publishes binaries and updates Homebrew.
 
-Options:
-  --dry-run        Print commands without executing
-  -h, --help       Show this help message
-
-Arguments:
-  version          Version number (e.g., 0.6.0)
-
-Examples:
-  release 0.6.0            # Release version 0.6.0
-  release --dry-run 0.6.0  # Show what would happen
+  --dry-run   Print commands without running them
+  -h, --help  Show help
 EOF
 }
 
@@ -94,11 +86,10 @@ main() {
     if $DRY_RUN; then
         echo "Dry run complete. No changes made."
     else
-        echo "Release v${VERSION} triggered!"
-        echo "GitHub Actions will build and publish artifacts."
-        echo ""
-        echo "After release completes, update the tap formula:"
-        echo "  script/update-homebrew ${VERSION}"
+        cat <<EOF
+Release v${VERSION} started. GitHub Actions will publish binaries and update Homebrew.
+Follow progress: gh run list --workflow release.yml
+EOF
     fi
 }
 

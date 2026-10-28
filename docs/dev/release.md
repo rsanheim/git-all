@@ -1,98 +1,47 @@
-# Release Process
+# Releases
 
-## Overview
-
-git-all is distributed via Homebrew tap using prebuilt binaries. This approach is language-agnostic - the formula downloads architecture-specific binaries regardless of whether they were built with Rust, Zig, or Crystal.
-
-## Architecture
-
-```
-rsanheim/git-all                rsanheim/homebrew-tap
-├── .github/workflows/          ├── Formula/
-│   └── release.yml  ──────────►│   └── git-all.rb
-└── script/                     └── .github/workflows/
-    ├── release                     └── lint.yml
-    └── update-homebrew
-```
-
-**Artifact naming** (language-agnostic):
-```
-git-all-{version}-darwin-arm64.tar.gz
-git-all-{version}-darwin-x86_64.tar.gz
-git-all-{version}-linux-arm64.tar.gz
-git-all-{version}-linux-x86_64.tar.gz
-```
-
-## Release Steps
-
-### 1. Create Release
-
-From the git-all repo:
+Run from the git-all checkout, using the next version:
 
 ```bash
-# Dry-run first
-script/release --dry-run 0.6.0
-
-# Create the release
-script/release 0.6.0
+script/release --dry-run 0.7.8
+script/release 0.7.8
 ```
 
-This will:
-* Update version in `rust/Cargo.toml`
-* Commit the version bump
-* Create and push a `v0.6.0` tag
-* GitHub Actions builds binaries and creates a GitHub Release
+The script commits the version bump and pushes a tag. GitHub Actions builds
+binaries for macOS and Linux (ARM64 and x86_64), publishes the release, then
+updates `rsanheim/homebrew-tap`. Each archive includes the binary and man page.
 
-### 2. Update Homebrew Tap
-
-The formula uses concrete versioned URLs and lets Homebrew infer the version.
-The updater refreshes those URLs and all four SHA256 hashes.
-
-After GitHub Actions completes (~5 min):
-
-```bash
-# Dry-run to see SHA256 hashes
-script/update-homebrew --dry-run 0.6.0
-
-# Update the formula
-script/update-homebrew 0.6.0
-
-# Commit and push the tap
-cd ~/src/rsanheim/homebrew-tap
-git diff  # verify changes
-git add -A && git commit -m "git-all 0.6.0" && git push
-```
-
-### 3. Verify Installation
+Check the Release workflow and the tap's CI, then verify the installed version:
 
 ```bash
 brew update
 brew upgrade git-all  # or: brew install rsanheim/tap/git-all
-git-all --version
+git-all meta
 ```
 
-## Local Testing
+## GitHub token setup
 
-Before releasing, test the formula locally:
+The release workflow needs permission to push to the separate tap repository.
+Create a fine-grained token for `rsanheim/homebrew-tap` with **Contents: Read and
+write**, then save it at the prompt:
 
 ```bash
-cd ~/src/rsanheim/homebrew-tap
-brew style Formula/git-all.rb
-brew readall rsanheim/tap
-brew test rsanheim/tap/git-all
-
-# Optional extra lint pass. Homebrew 6 rejects path-based audit.
-brew audit --strict rsanheim/tap/git-all
+gh secret set HOMEBREW_TAP_TOKEN --repo rsanheim/git-all
 ```
 
-## Changing Implementation Language
+Replace this secret when the token expires.
 
-When switching from Rust to Zig (or Crystal):
+## Retry a Homebrew update
 
-| Component | Changes | No Changes |
-|-----------|---------|------------|
-| release.yml | `cargo build` → `zig build` | Artifact names, upload step |
-| script/release | Cargo.toml → build.zig | Tag/push logic |
-| Formula/git-all.rb | None | Downloads same artifacts |
+If the Homebrew job fails, fix the reported error and rerun the failed job.
+The GitHub Release stays published; an unchanged formula needs no new commit.
 
-The formula never knows what language built the binary.
+To update Homebrew from an existing release without rebuilding binaries:
+
+```bash
+gh workflow run release.yml --ref main -f version=0.7.7
+```
+
+For local formula work, use `script/update-homebrew <version>`. Set `TAP_PATH`
+if the tap checkout is not at `~/src/rsanheim/homebrew-tap`. The script updates
+URLs and hashes; commit and push the formula from that checkout.
