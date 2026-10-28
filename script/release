@@ -95,10 +95,8 @@ main() {
         echo "Dry run complete. No changes made."
     else
         echo "Release v${VERSION} triggered!"
-        echo "GitHub Actions will build and publish artifacts."
-        echo ""
-        echo "After release completes, update the tap formula:"
-        echo "  script/update-homebrew ${VERSION}"
+        echo "GitHub Actions will build and publish artifacts, then update the Homebrew tap."
+        echo "Monitor the Release workflow through the Update Homebrew tap job."
     fi
 }
 

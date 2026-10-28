@@ -62,7 +62,7 @@ jobs:
 
       - name: Get version from tag
         id: version
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
 
       - name: Rename artifacts with version
         run: |
@@ -80,3 +80,52 @@ jobs:
             git-all-${{ steps.version.outputs.version }}-linux-arm64.tar.gz
             git-all-${{ steps.version.outputs.version }}-linux-x86_64.tar.gz
           generate_release_notes: true
+
+  homebrew:
+    name: Update Homebrew tap
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    concurrency:
+      group: homebrew-tap
+      cancel-in-progress: false
+    steps:
+      - name: Check tap credentials
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [[ -z "$HOMEBREW_TAP_TOKEN" ]]; then
+            echo "::error::Set HOMEBREW_TAP_TOKEN with Contents read/write access to rsanheim/homebrew-tap. See docs/dev/release.md."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check out Homebrew tap
+        uses: actions/checkout@v4
+        with:
+          repository: rsanheim/homebrew-tap
+          ref: main
+          path: homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Update formula from published artifacts
+        env:
+          TAP_PATH: ${{ github.workspace }}/homebrew-tap
+        run: script/update-homebrew "${GITHUB_REF_NAME#v}"
+
+      - name: Publish formula
+        working-directory: homebrew-tap
+        run: |
+          if git diff --quiet -- Formula/git-all.rb; then
+            echo "Homebrew formula is already up to date."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/git-all.rb
+          git commit -m "git-all ${GITHUB_REF_NAME#v}"
+          git push origin HEAD:main

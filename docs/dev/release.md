@@ -25,6 +25,22 @@ git-all-{version}-linux-x86_64.tar.gz
 
 ## Release Steps
 
+### One-time Authentication Setup
+
+Add an Actions repository secret named `HOMEBREW_TAP_TOKEN` to
+`rsanheim/git-all`. Use a fine-grained personal access token restricted to
+`rsanheim/homebrew-tap` with **Contents: Read and write** permission. The token
+must be allowed to push to the tap's `main` branch.
+
+```bash
+gh secret set HOMEBREW_TAP_TOKEN --repo rsanheim/git-all
+```
+
+The command prompts for the token. The workflow's built-in `GITHUB_TOKEN`
+cannot push to another repository; see
+[GitHub's authentication guidance](https://docs.github.com/en/actions/tutorials/authenticate-with-github_token#granting-additional-permissions).
+Renew the secret when its token expires.
+
 ### 1. Create Release
 
 From the git-all repo:
@@ -42,13 +58,22 @@ This will:
 * Commit the version bump
 * Create and push a `v0.6.0` tag
 * GitHub Actions builds binaries and creates a GitHub Release
+* After publication, the `Update Homebrew tap` job updates and pushes the formula
 
-### 2. Update Homebrew Tap
+### 2. Check the Homebrew Update
 
 The formula uses concrete versioned URLs and lets Homebrew infer the version.
-The updater refreshes those URLs and all four SHA256 hashes.
+The workflow runs `script/update-homebrew` against a checkout of
+`rsanheim/homebrew-tap`, downloads the published artifacts to compute all four
+SHA256 hashes, and commits only `Formula/git-all.rb` to the tap's `main` branch.
+That push triggers the tap's existing lint and installation tests.
 
-After GitHub Actions completes (~5 min):
+Check that both the release workflow's `Update Homebrew tap` job and the tap's
+CI pass. A failed tap update leaves the GitHub Release published but marks the
+release workflow as failed. Fix the credential or push error, then rerun the
+failed job. An unchanged formula is a successful no-op.
+
+For releases created before this automation, or to update the tap manually:
 
 ```bash
 # Dry-run to see SHA256 hashes
@@ -60,7 +85,7 @@ script/update-homebrew 0.6.0
 # Commit and push the tap
 cd ~/src/rsanheim/homebrew-tap
 git diff  # verify changes
-git add -A && git commit -m "git-all 0.6.0" && git push
+git add Formula/git-all.rb && git commit -m "git-all 0.6.0" && git push
 ```
 
 ### 3. Verify Installation
@@ -68,7 +93,7 @@ git add -A && git commit -m "git-all 0.6.0" && git push
 ```bash
 brew update
 brew upgrade git-all  # or: brew install rsanheim/tap/git-all
-git-all --version
+git-all meta
 ```
 
 ## Local Testing
