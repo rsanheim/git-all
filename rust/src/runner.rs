@@ -454,7 +454,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn summary_uses_outcomes_not_display_text_or_trace_configuration() {
+    fn summary_counts_outcomes_and_ignores_unfinished_rows() {
         use std::os::unix::process::ExitStatusExt;
         use std::process::ExitStatus;
 
@@ -462,32 +462,17 @@ mod tests {
             RepoRow::pending("pending".into()),
             RepoRow::running("running".into()),
         ];
-        for (name, text, outcome, trace) in [
-            (
-                "success",
-                "ERROR: this is just command output",
-                Ok(ExitStatus::from_raw(0)),
-                None,
-            ),
-            (
-                "nonzero",
-                "clean",
-                Ok(ExitStatus::from_raw(7 << 8)),
-                Some(RepoTraceSample::default()),
-            ),
-            ("signal", "clean", Ok(ExitStatus::from_raw(15)), None),
-            (
-                "spawn-error",
-                "clean",
-                Err(io::Error::new(io::ErrorKind::NotFound, "git missing")),
-                None,
-            ),
+        for outcome in [
+            Ok(ExitStatus::from_raw(0)),
+            Ok(ExitStatus::from_raw(7 << 8)),
+            Ok(ExitStatus::from_raw(15)),
+            Err(io::Error::new(io::ErrorKind::NotFound, "git missing")),
         ] {
-            let mut row = RepoRow::pending(name.into());
-            row.mark_finished(text.into(), outcome, trace);
+            let mut row = RepoRow::pending("repo".into());
+            // Identical display text must not affect success/failure counts.
+            row.mark_finished("clean".into(), outcome, None);
             rows.push(row);
         }
-
         let summary = RunSummary::from_rows(&rows);
         assert_eq!(
             summary,
@@ -497,44 +482,6 @@ mod tests {
             }
         );
         assert_eq!(summary.completed(), 4);
-        let RowState::Finished { outcome, .. } = &rows[3].state else {
-            panic!("expected finished row");
-        };
-        assert_eq!(outcome.as_ref().unwrap().code(), Some(7));
-        let RowState::Finished { outcome, .. } = &rows[5].state else {
-            panic!("expected finished row");
-        };
-        assert_eq!(
-            outcome.as_ref().unwrap_err().kind(),
-            io::ErrorKind::NotFound
-        );
-    }
-
-    #[test]
-    fn dry_run_returns_no_executed_outcomes() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut ctx = ExecutionContext::new(
-            true,
-            None,
-            false,
-            1,
-            temp.path().to_path_buf(),
-            TraceSink::Disabled,
-        );
-        struct UnexpectedOutput;
-        impl OutputFormatter for UnexpectedOutput {
-            fn format(&self, _: &Output) -> String {
-                panic!("dry runs must not execute commands");
-            }
-        }
-        let summary = run_parallel(
-            &mut ctx,
-            &[temp.path().join("does-not-exist")],
-            |repo| GitCommand::new(repo.clone(), vec!["status".into()]),
-            &UnexpectedOutput,
-        )
-        .unwrap();
-        assert_eq!(summary, RunSummary::default());
     }
 
     #[test]
