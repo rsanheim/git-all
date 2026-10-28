@@ -1,6 +1,12 @@
 name: Release
 
 on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Published version to update in Homebrew (e.g., 0.7.7)'
+        required: true
+        type: string
   push:
     tags:
       - 'v*'
@@ -10,6 +16,7 @@ permissions:
 
 jobs:
   build:
+    if: github.event_name == 'push'
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -84,7 +91,10 @@ jobs:
   homebrew:
     name: Update Homebrew tap
     needs: release
+    if: ${{ !cancelled() && (needs.release.result == 'success' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
+    env:
+      RELEASE_VERSION: ${{ inputs.version || github.ref_name }}
     permissions:
       contents: read
     concurrency:
@@ -115,7 +125,7 @@ jobs:
       - name: Update formula from published artifacts
         env:
           TAP_PATH: ${{ github.workspace }}/homebrew-tap
-        run: script/update-homebrew "${GITHUB_REF_NAME#v}"
+        run: script/update-homebrew "${RELEASE_VERSION#v}"
 
       - name: Publish formula
         working-directory: homebrew-tap
@@ -127,5 +137,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Formula/git-all.rb
-          git commit -m "git-all ${GITHUB_REF_NAME#v}"
+          git commit -m "git-all ${RELEASE_VERSION#v}"
           git push origin HEAD:main
