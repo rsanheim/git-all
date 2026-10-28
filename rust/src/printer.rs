@@ -2,6 +2,9 @@ use crossterm::cursor::{MoveToColumn, MoveUp};
 use crossterm::queue;
 use crossterm::terminal::{Clear, ClearType};
 use std::io::{self, Write};
+use std::process::ExitStatus;
+
+use crate::trace::RepoTraceSample;
 
 /// Fallback width used when the terminal does not report its size (0 columns).
 /// A real width, however small, is always respected as-is.
@@ -61,56 +64,61 @@ fn in_progress_label(names: &[&str], width: usize) -> String {
     label
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum RowState {
     Pending,
     Running,
-    Finished,
+    Finished {
+        output: String,
+        outcome: io::Result<ExitStatus>,
+        trace_sample: Option<RepoTraceSample>,
+    },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct RepoRow {
     pub repo: String,
-    pub output: String,
     pub state: RowState,
 }
 
 impl RepoRow {
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn pending(repo: String) -> Self {
         Self {
             repo,
-            output: "pending".to_string(),
             state: RowState::Pending,
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn running(repo: String) -> Self {
         Self {
             repo,
-            output: "running".to_string(),
             state: RowState::Running,
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn finished(repo: String, output: String) -> Self {
-        Self {
-            repo,
-            output,
-            state: RowState::Finished,
-        }
+        let mut row = Self::pending(repo);
+        row.mark_finished(output, Ok(ExitStatus::default()), None);
+        row
     }
 
     pub fn mark_running(&mut self) {
-        self.output = "running".to_string();
         self.state = RowState::Running;
     }
 
-    pub fn mark_finished(&mut self, output: String) {
-        self.output = output;
-        self.state = RowState::Finished;
+    pub fn mark_finished(
+        &mut self,
+        output: String,
+        outcome: io::Result<ExitStatus>,
+        trace_sample: Option<RepoTraceSample>,
+    ) {
+        self.state = RowState::Finished {
+            output,
+            outcome,
+            trace_sample,
+        };
     }
 }
 
@@ -168,15 +176,15 @@ impl<W: Write> PlainPrinter<W> {
 
     fn flush_finished_rows(&mut self, rows: &[RepoRow]) -> io::Result<Vec<usize>> {
         let mut printed = Vec::new();
-        while self.next_to_print < rows.len()
-            && rows[self.next_to_print].state == RowState::Finished
-        {
-            let row = &rows[self.next_to_print];
+        while let Some(row) = rows.get(self.next_to_print) {
+            let RowState::Finished { output, .. } = &row.state else {
+                break;
+            };
             writeln!(
                 self.writer,
                 "{} {}",
                 format_repo_name(&row.repo, self.repo_width),
-                row.output
+                output
             )?;
             printed.push(self.next_to_print);
             self.next_to_print += 1;
@@ -196,7 +204,7 @@ impl<W: Write> Printer for PlainPrinter<W> {
         row_index: usize,
         _elapsed_ms: u128,
     ) -> io::Result<Vec<usize>> {
-        if rows[row_index].state != RowState::Finished {
+        if !matches!(rows[row_index].state, RowState::Finished { .. }) {
             return Ok(Vec::new());
         }
         self.flush_finished_rows(rows)
@@ -245,21 +253,18 @@ impl<W: Write> TtyTablePrinter<W> {
         line[..end].to_string()
     }
 
-    fn render_finished_row(&self, row: &RepoRow) -> String {
-        format!(
-            "{} {}",
-            format_repo_name(&row.repo, self.repo_width),
-            row.output
-        )
-    }
-
     fn flush_finished_rows(&mut self, rows: &[RepoRow]) -> io::Result<Vec<usize>> {
         let mut printed = Vec::new();
-        while self.next_to_print < rows.len()
-            && rows[self.next_to_print].state == RowState::Finished
-        {
-            let row = &rows[self.next_to_print];
-            writeln!(self.writer, "{}", self.render_finished_row(row))?;
+        while let Some(row) = rows.get(self.next_to_print) {
+            let RowState::Finished { output, .. } = &row.state else {
+                break;
+            };
+            writeln!(
+                self.writer,
+                "{} {}",
+                format_repo_name(&row.repo, self.repo_width),
+                output
+            )?;
             printed.push(self.next_to_print);
             self.next_to_print += 1;
         }
@@ -285,7 +290,7 @@ impl<W: Write> TtyTablePrinter<W> {
         let mut pending = 0usize;
         for row in rows {
             match row.state {
-                RowState::Finished => complete += 1,
+                RowState::Finished { .. } => complete += 1,
                 RowState::Running => running += 1,
                 RowState::Pending => pending += 1,
             }
@@ -301,15 +306,15 @@ impl<W: Write> TtyTablePrinter<W> {
             "done".to_string()
         } else {
             // Row order keeps the repo blocking output first in the label.
-            let names_in = |state: RowState| -> Vec<&str> {
+            let names_in = |matches_state: fn(&RowState) -> bool| -> Vec<&str> {
                 rows.iter()
-                    .filter(|row| row.state == state)
+                    .filter(|row| matches_state(&row.state))
                     .map(|row| row.repo.as_str())
                     .collect()
             };
-            let mut names = names_in(RowState::Running);
+            let mut names = names_in(|state| matches!(state, RowState::Running));
             if names.is_empty() {
-                names = names_in(RowState::Pending);
+                names = names_in(|state| matches!(state, RowState::Pending));
             }
             in_progress_label(&names, self.repo_width)
         };
@@ -620,9 +625,9 @@ mod tests {
         {
             let mut printer = TtyTablePrinter::new(&mut output, 80, 14);
             printer.start(&rows).expect("tty start");
-            rows[0].mark_finished("clean".to_string());
+            rows[0].mark_finished("clean".to_string(), Ok(ExitStatus::default()), None);
             printer.update_row(&rows, 0, 100).expect("tty update 0");
-            rows[1].mark_finished("1 modified".to_string());
+            rows[1].mark_finished("1 modified".to_string(), Ok(ExitStatus::default()), None);
             printer.update_row(&rows, 1, 200).expect("tty update 1");
         }
 
@@ -646,7 +651,7 @@ mod tests {
             let mut printer = TtyTablePrinter::new(output.clone(), 80, 14);
             printer.start(&rows).expect("tty start");
 
-            rows[1].mark_finished("clean".to_string());
+            rows[1].mark_finished("clean".to_string(), Ok(ExitStatus::default()), None);
             let printed = printer.update_row(&rows, 1, 100).expect("tty late finish");
             assert!(printed.is_empty(), "row 1 must buffer until row 0 finishes");
             let mid = strip_ansi_sequences(&output.rendered());
@@ -655,7 +660,7 @@ mod tests {
                 "agentic-dev row not yet flushed, got: {mid:?}"
             );
 
-            rows[0].mark_finished("clean".to_string());
+            rows[0].mark_finished("clean".to_string(), Ok(ExitStatus::default()), None);
             let printed = printer
                 .update_row(&rows, 0, 200)
                 .expect("tty contiguous finish");
@@ -676,7 +681,7 @@ mod tests {
         {
             let mut printer = TtyTablePrinter::new(&mut output, 80, 14);
             printer.start(&rows).expect("tty start");
-            rows[0].mark_finished("clean".to_string());
+            rows[0].mark_finished("clean".to_string(), Ok(ExitStatus::default()), None);
             printer.update_row(&rows, 0, 100).expect("tty update");
         }
 
@@ -700,7 +705,7 @@ mod tests {
         {
             let mut printer = TtyTablePrinter::new(&mut output, 40, 14);
             printer.start(&rows).expect("tty start");
-            rows[0].mark_finished(long_status.to_string());
+            rows[0].mark_finished(long_status.to_string(), Ok(ExitStatus::default()), None);
             printer.update_row(&rows, 0, 100).expect("tty update");
         }
 
@@ -738,8 +743,8 @@ mod tests {
         {
             let mut printer = TtyTablePrinter::new(&mut output, 80, 14);
             printer.start(&rows).expect("tty start");
-            rows[0].mark_finished("clean".to_string());
-            rows[1].mark_finished("clean".to_string());
+            rows[0].mark_finished("clean".to_string(), Ok(ExitStatus::default()), None);
+            rows[1].mark_finished("clean".to_string(), Ok(ExitStatus::default()), None);
             let printed = printer.complete(&rows, 1500).expect("tty complete");
             assert_eq!(printed, vec![0, 1]);
         }
@@ -774,7 +779,7 @@ mod tests {
         assert!(rendered.contains("[repo-053] 1 of 2 done | 1 running | 0 pending | 32.0s"));
         assert!(!rendered.contains("[repo-054"));
 
-        rows[0].mark_finished("clean".to_string());
+        rows[0].mark_finished("clean".to_string(), Ok(ExitStatus::default()), None);
         assert_eq!(printer.update_row(&rows, 0, 32_100).unwrap(), vec![0, 1]);
         let rendered = strip_ansi_sequences(&output.rendered());
         assert!(rendered.ends_with("[done    ] 2 of 2 done | 0 running | 0 pending | 32.1s\n"));

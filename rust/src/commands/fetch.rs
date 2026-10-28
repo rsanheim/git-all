@@ -1,8 +1,8 @@
-use anyhow::Result;
+use std::io;
 use std::path::PathBuf;
 use std::process::Output;
 
-use crate::runner::{ExecutionContext, GitCommand, OutputFormatter, run_parallel};
+use crate::runner::{ExecutionContext, GitCommand, OutputFormatter, RunSummary, run_parallel};
 
 struct FetchFormatter;
 
@@ -60,7 +60,11 @@ impl OutputFormatter for FetchFormatter {
     }
 }
 
-pub fn run(ctx: &mut ExecutionContext, repos: &[PathBuf], extra_args: &[String]) -> Result<()> {
+pub fn run(
+    ctx: &mut ExecutionContext,
+    repos: &[PathBuf],
+    extra_args: &[String],
+) -> io::Result<RunSummary> {
     let formatter = FetchFormatter;
 
     run_parallel(

@@ -1,5 +1,5 @@
-use anyhow::Result;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,7 +58,7 @@ pub fn is_inside_git_repo() -> bool {
 }
 
 /// Find all git repositories under the given root, honoring scan depth.
-pub fn find_git_repos_in(root: &Path, scan_depth: ScanDepth) -> Result<Vec<PathBuf>> {
+pub fn find_git_repos_in(root: &Path, scan_depth: ScanDepth) -> io::Result<Vec<PathBuf>> {
     let mut repos = Vec::new();
     scan_dir(root, 0, scan_depth.max_depth(), &mut repos)?;
     repos.sort();
@@ -70,7 +70,7 @@ fn scan_dir(
     depth: usize,
     max_depth: Option<usize>,
     repos: &mut Vec<PathBuf>,
-) -> Result<()> {
+) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let Ok(entry) = entry else {
             continue;

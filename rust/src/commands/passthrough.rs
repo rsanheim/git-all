@@ -1,8 +1,8 @@
-use anyhow::Result;
+use std::io;
 use std::path::PathBuf;
 use std::process::Output;
 
-use crate::runner::{ExecutionContext, GitCommand, OutputFormatter, run_parallel};
+use crate::runner::{ExecutionContext, GitCommand, OutputFormatter, RunSummary, run_parallel};
 
 struct PassthroughFormatter;
 
@@ -29,9 +29,16 @@ impl OutputFormatter for PassthroughFormatter {
     }
 }
 
-pub fn run(ctx: &mut ExecutionContext, repos: &[PathBuf], args: &[String]) -> Result<()> {
+pub fn run(
+    ctx: &mut ExecutionContext,
+    repos: &[PathBuf],
+    args: &[String],
+) -> io::Result<RunSummary> {
     if args.is_empty() {
-        anyhow::bail!("No git command specified");
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "No git command specified",
+        ));
     }
 
     let formatter = PassthroughFormatter;

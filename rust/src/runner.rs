@@ -1,13 +1,13 @@
-use anyhow::Result;
 use crossterm::terminal::size as terminal_size;
 use crossterm::tty::IsTty;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::printer::{PlainPrinter, Printer, RepoRow, TtyTablePrinter};
+use crate::printer::{PlainPrinter, Printer, RepoRow, RowState, TtyTablePrinter};
 use crate::repo::repo_display_name;
 use crate::trace::{RepoTraceSample, TraceSink, TraceSummary};
 
@@ -50,8 +50,33 @@ const REPO_NAME_PADDING: usize = 5;
 const MAX_REPO_NAME_WIDTH_CAP: usize = 48;
 const TTY_TICK_INTERVAL: Duration = Duration::from_millis(250);
 
-/// Trace sample for a completed repo (`None` when `GIT_ALL_TRACE` is off).
-type RepoCompletion = Option<RepoTraceSample>;
+/// Counts executed commands, independently of their displayed output.
+/// Dry runs contain no completed commands and return an empty summary.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RunSummary {
+    pub succeeded: usize,
+    pub failed: usize,
+}
+
+impl RunSummary {
+    pub fn completed(&self) -> usize {
+        self.succeeded + self.failed
+    }
+
+    fn from_rows(rows: &[RepoRow]) -> Self {
+        let mut summary = Self::default();
+        for row in rows {
+            if let RowState::Finished { outcome, .. } = &row.state {
+                if outcome.as_ref().is_ok_and(|status| status.success()) {
+                    summary.succeeded += 1;
+                } else {
+                    summary.failed += 1;
+                }
+            }
+        }
+        summary
+    }
+}
 
 enum RepoEvent {
     Started {
@@ -59,7 +84,7 @@ enum RepoEvent {
     },
     Completed {
         idx: usize,
-        result: Result<Output, std::io::Error>,
+        result: io::Result<Output>,
         trace_sample: Option<RepoTraceSample>,
     },
 }
@@ -221,7 +246,7 @@ impl GitCommand {
 pub trait OutputFormatter: Sync {
     fn format(&self, output: &Output) -> String;
 
-    fn format_result(&self, result: &Result<Output, std::io::Error>) -> String {
+    fn format_result(&self, result: &io::Result<Output>) -> String {
         match result {
             Ok(output) => self.format(output),
             Err(e) => format!("ERROR: {}", e),
@@ -231,21 +256,26 @@ pub trait OutputFormatter: Sync {
 
 fn emit_traces_for_printed_rows(
     ctx: &mut ExecutionContext,
-    repos: &[PathBuf],
-    completions: &[Option<RepoCompletion>],
+    rows: &[RepoRow],
     printed_indices: &[usize],
     printed_ms: u128,
     summary: &mut TraceSummary,
-) -> Result<()> {
-    for idx in printed_indices {
-        let Some(maybe_sample) = &completions[*idx] else {
-            continue;
-        };
-        if let Some(sample) = maybe_sample {
+) -> io::Result<()> {
+    for &idx in printed_indices {
+        if let RowState::Finished {
+            outcome,
+            trace_sample: Some(sample),
+            ..
+        } = &rows[idx].state
+        {
             summary.record(sample, printed_ms);
-            let repo_name = repo_display_name(&repos[*idx], ctx.display_root());
-            ctx.trace_mut()
-                .emit_repo(*idx, &repo_name, *sample, printed_ms)?;
+            ctx.trace_mut().emit_repo(
+                idx,
+                &rows[idx].repo,
+                *sample,
+                outcome.as_ref().is_ok_and(|status| status.success()),
+                printed_ms,
+            )?;
         }
     }
     Ok(())
@@ -261,12 +291,14 @@ fn emit_traces_for_printed_rows(
 ///
 /// Uses a thread-per-process pattern with `wait_with_output()`, which is
 /// deadlock-safe because stdlib drains stdout/stderr concurrently.
+/// Repository failures belong to the returned summary; Err means the runner
+/// could not finish reporting the run (for example, an output write failed).
 pub fn run_parallel<F>(
     ctx: &mut ExecutionContext,
     repos: &[PathBuf],
     build_command: F,
     formatter: &dyn OutputFormatter,
-) -> Result<()>
+) -> io::Result<RunSummary>
 where
     F: Fn(&PathBuf) -> GitCommand + Sync,
 {
@@ -274,11 +306,12 @@ where
     let trace_enabled = ctx.trace_enabled();
 
     if ctx.is_dry_run() {
+        let mut stdout = io::stdout().lock();
         for repo in repos {
             let cmd = build_command(repo);
-            println!("{}", cmd.command_string(opts));
+            writeln!(stdout, "{}", cmd.command_string(opts))?;
         }
-        return Ok(());
+        return Ok(RunSummary::default());
     }
 
     let name_width = compute_name_width(repos, ctx.display_root());
@@ -314,13 +347,12 @@ where
         None
     };
 
-    let mut completions: Vec<Option<RepoCompletion>> = (0..repos.len()).map(|_| None).collect();
     let mut summary = TraceSummary::default();
 
     let (tx, rx) = mpsc::channel();
 
     let build_git_cmd = &build_command;
-    std::thread::scope(|s| -> Result<()> {
+    std::thread::scope(|s| -> io::Result<()> {
         for (idx, _) in repos.iter().enumerate() {
             let tx = tx.clone();
             let sem = semaphore.clone();
@@ -343,13 +375,9 @@ where
                 };
 
                 let trace_sample = trace_enabled.then(|| {
-                    let (stdout_bytes, stderr_bytes, success) = match &result {
-                        Ok(output) => (
-                            output.stdout.len(),
-                            output.stderr.len(),
-                            output.status.success(),
-                        ),
-                        Err(_) => (0, 0, false),
+                    let (stdout_bytes, stderr_bytes) = match &result {
+                        Ok(output) => (output.stdout.len(), output.stderr.len()),
+                        Err(_) => (0, 0),
                     };
                     RepoTraceSample {
                         start_ms,
@@ -357,7 +385,6 @@ where
                         exit_ms: run_started_at.elapsed().as_millis(),
                         stdout_bytes,
                         stderr_bytes,
-                        success,
                     }
                 });
 
@@ -393,18 +420,15 @@ where
                     result,
                     trace_sample,
                 }) => {
-                    rows[idx].mark_finished(formatter.format_result(&result));
-                    completions[idx] = Some(trace_sample);
+                    let output = formatter.format_result(&result);
+                    rows[idx].mark_finished(
+                        output,
+                        result.map(|output| output.status),
+                        trace_sample,
+                    );
                     let elapsed_ms = run_started_at.elapsed().as_millis();
                     let printed = printer.update_row(&rows, idx, elapsed_ms)?;
-                    emit_traces_for_printed_rows(
-                        ctx,
-                        repos,
-                        &completions,
-                        &printed,
-                        elapsed_ms,
-                        &mut summary,
-                    )?;
+                    emit_traces_for_printed_rows(ctx, &rows, &printed, elapsed_ms, &mut summary)?;
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     printer.tick(&rows, run_started_at.elapsed().as_millis())?;
@@ -417,16 +441,48 @@ where
 
     let total_ms = run_started_at.elapsed().as_millis();
     let printed = printer.complete(&rows, total_ms)?;
-    emit_traces_for_printed_rows(ctx, repos, &completions, &printed, total_ms, &mut summary)?;
+    emit_traces_for_printed_rows(ctx, &rows, &printed, total_ms, &mut summary)?;
     ctx.trace_mut()
         .emit_summary(repos.len(), &summary, total_ms)?;
 
-    Ok(())
+    Ok(RunSummary::from_rows(&rows))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn summary_counts_outcomes_and_ignores_unfinished_rows() {
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::ExitStatus;
+
+        let mut rows = vec![
+            RepoRow::pending("pending".into()),
+            RepoRow::running("running".into()),
+        ];
+        for outcome in [
+            Ok(ExitStatus::from_raw(0)),
+            Ok(ExitStatus::from_raw(7 << 8)),
+            Ok(ExitStatus::from_raw(15)),
+            Err(io::Error::new(io::ErrorKind::NotFound, "git missing")),
+        ] {
+            let mut row = RepoRow::pending("repo".into());
+            // Identical display text must not affect success/failure counts.
+            row.mark_finished("clean".into(), outcome, None);
+            rows.push(row);
+        }
+        let summary = RunSummary::from_rows(&rows);
+        assert_eq!(
+            summary,
+            RunSummary {
+                succeeded: 1,
+                failed: 3
+            }
+        );
+        assert_eq!(summary.completed(), 4);
+    }
 
     #[test]
     fn test_command_string_includes_ssh_scheme_override() {
