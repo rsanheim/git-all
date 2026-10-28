@@ -15,7 +15,6 @@ pub struct RepoTraceSample {
     pub exit_ms: u128,
     pub stdout_bytes: usize,
     pub stderr_bytes: usize,
-    pub success: bool,
 }
 
 impl RepoTraceSample {
@@ -100,6 +99,7 @@ impl TraceSink {
         idx: usize,
         repo_name: &str,
         sample: RepoTraceSample,
+        success: bool,
         printed_ms: u128,
     ) -> io::Result<()> {
         if !self.enabled() {
@@ -122,7 +122,7 @@ impl TraceSink {
             ordered_wait_ms = sample.ordered_wait_ms(printed_ms),
             stdout_bytes = sample.stdout_bytes,
             stderr_bytes = sample.stderr_bytes,
-            success = sample.success,
+            success = success,
         ))
     }
 

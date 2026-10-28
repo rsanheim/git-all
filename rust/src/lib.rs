@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use std::process::Command;
 use std::time::Instant;
@@ -162,12 +162,13 @@ pub fn run() -> Result<()> {
         passthrough_to_git();
     }
 
-    let mut trace = TraceSink::from_env()?;
+    let mut trace = TraceSink::from_env().context("failed to open trace output")?;
     let cli = Cli::parse();
 
     let cwd = std::env::current_dir()?;
     let scan_started_at = Instant::now();
-    let repos = find_git_repos_in(&cwd, cli.scan_depth)?;
+    let repos = find_git_repos_in(&cwd, cli.scan_depth)
+        .with_context(|| format!("failed to scan repositories in {}", cwd.display()))?;
     let workers = cli.workers.unwrap_or_else(|| default_workers(&cli.command));
     trace.emit_scan(
         command_label(&cli.command),
@@ -205,7 +206,7 @@ pub fn run() -> Result<()> {
         );
     }
 
-    match cli.command {
+    let summary = match cli.command {
         Some(Commands::Pull { args }) => pull::run(&mut ctx, &repos, &args),
         Some(Commands::Fetch { args }) => fetch::run(&mut ctx, &repos, &args),
         Some(Commands::Status { args }) => status::run(&mut ctx, &repos, &args),
@@ -214,7 +215,19 @@ pub fn run() -> Result<()> {
         None => {
             // No command given - show help
             println!("No command specified. Use --help for usage information.");
-            Ok(())
+            return Ok(());
         }
     }
+    .context("failed to run repository commands")?;
+
+    // Individual git failures are reported without changing the historical
+    // successful exit status of a completed multi-repository run.
+    if summary.failed > 0 {
+        eprintln!(
+            "git-all: {} of {} repositories failed",
+            summary.failed,
+            summary.completed()
+        );
+    }
+    Ok(())
 }
